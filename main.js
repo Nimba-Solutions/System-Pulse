@@ -1005,85 +1005,129 @@ function makeRequest(conn, method, path, payload, onResponse) {
   req.end();
 }
 
+// Auto-register with cloud server if no API key
+function autoRegister(conn, callback) {
+  const regPayload = JSON.stringify({
+    hostname: os.hostname(),
+    machineName: store.get('remote.machineName') || os.hostname(),
+    platform: process.platform,
+    cpuModel: os.cpus()[0]?.model || 'Unknown',
+    cpuCores: os.cpus().length,
+    totalMemMb: Math.round(os.totalmem() / 1048576),
+  });
+  makeRequest(conn, 'POST', '/register', regPayload, (res) => {
+    let body = '';
+    res.on('data', chunk => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const { apiKey } = JSON.parse(body);
+        if (apiKey) {
+          store.set('remote.apiKey', apiKey);
+          console.log('Auto-registered with cloud server, API key:', apiKey.slice(0, 8) + '...');
+          if (callback) callback(apiKey);
+        }
+      } catch (e) {}
+    });
+  });
+}
+
+function buildSnapshotPayload(sys, procs) {
+  const topCpu = procs.sort((a, b) => b.cpu - a.cpu).slice(0, 10)
+    .map(p => ({ name: p.name, pid: p.pid, cpu: p.cpu, memMb: p.memMb }));
+  const topMem = [...procs].sort((a, b) => (b.memMB || 0) - (a.memMB || 0)).slice(0, 5)
+    .map(p => ({ name: p.name, pid: p.pid, memMb: p.memMb }));
+
+  const nameCounts = {};
+  for (const p of procs) nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
+  const duplicates = Object.entries(nameCounts)
+    .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe'].includes(name))
+    .map(([name, count]) => ({ name, count }));
+
+  const events = [];
+  if (sys.cpuPercent > 75) events.push({ type: 'high-cpu', value: sys.cpuPercent });
+  if ((sys.usedMem / sys.totalMem) > 0.9) events.push({ type: 'high-memory', pct: Math.round((sys.usedMem / sys.totalMem) * 100) });
+  if (duplicates.length > 0) events.push({ type: 'duplicates', items: duplicates });
+
+  return JSON.stringify({
+    hostname: store.get('remote.machineName') || os.hostname(),
+    ts: new Date().toISOString(),
+    cpu: sys.cpuPercent,
+    memUsedMb: Math.round(sys.usedMem / 1048576),
+    memTotalMb: Math.round(sys.totalMem / 1048576),
+    memPct: Math.round((sys.usedMem / sys.totalMem) * 100),
+    topCpu,
+    topMem,
+    duplicates,
+    events,
+    uptime: sys.uptime,
+  });
+}
+
+function pollServerForCommands(conn, myHostname) {
+  const hostHeader = { 'x-hostname': myHostname };
+  const pollConn = { ...conn, headers: { ...conn.headers, ...hostHeader } };
+
+  // Check for pending kill commands
+  makeRequest(pollConn, 'GET', '/pending-kills', null, (res) => {
+    let body = '';
+    res.on('data', chunk => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const kills = JSON.parse(body);
+        for (const k of kills) {
+          if (k.pid) killProcess(k.pid);
+        }
+      } catch (e) {}
+    });
+  });
+
+  // Check for pending remote commands
+  makeRequest(pollConn, 'GET', '/pending-commands', null, (cmdRes) => {
+    let cmdBody = '';
+    cmdRes.on('data', chunk => { cmdBody += chunk; });
+    cmdRes.on('end', () => {
+      try {
+        const cmds = JSON.parse(cmdBody);
+        for (const cmd of cmds) {
+          exec(cmd.command, { timeout: 30000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+            const resultPayload = JSON.stringify({
+              hostname: myHostname,
+              cmdId: cmd.id,
+              stdout: (stdout || '').slice(0, 500000),
+              stderr: (stderr || '').slice(0, 100000),
+              exitCode: err ? err.code || 1 : 0,
+            });
+            makeRequest(conn, 'POST', '/command-result', resultPayload);
+          });
+        }
+      } catch (e) {}
+    });
+  });
+}
+
 async function pushSnapshotToServer(serverAddress) {
   try {
     const conn = getConnectionParams(serverAddress);
     const sys = getSystemInfo();
     const procs = await getProcessList();
-
-    const topCpu = procs.sort((a, b) => b.cpu - a.cpu).slice(0, 10)
-      .map(p => ({ name: p.name, pid: p.pid, cpu: p.cpu, memMb: p.memMb }));
-    const topMem = procs.sort((a, b) => b.memMb - a.memMb).slice(0, 5)
-      .map(p => ({ name: p.name, pid: p.pid, memMb: p.memMb }));
-
-    // Duplicates
-    const nameCounts = {};
-    for (const p of procs) nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
-    const duplicates = Object.entries(nameCounts)
-      .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe'].includes(name))
-      .map(([name, count]) => ({ name, count }));
-
-    const events = [];
-    if (sys.cpuPercent > 75) events.push({ type: 'high-cpu', value: sys.cpuPercent });
-    if ((sys.usedMem / sys.totalMem) > 0.9) events.push({ type: 'high-memory', pct: Math.round((sys.usedMem / sys.totalMem) * 100) });
-    if (duplicates.length > 0) events.push({ type: 'duplicates', items: duplicates });
-
-    const payload = JSON.stringify({
-      hostname: store.get('remote.machineName') || os.hostname(),
-      ts: new Date().toISOString(),
-      cpu: sys.cpuPercent,
-      memUsedMb: Math.round(sys.usedMem / 1048576),
-      memTotalMb: Math.round(sys.totalMem / 1048576),
-      memPct: Math.round((sys.usedMem / sys.totalMem) * 100),
-      topCpu,
-      topMem,
-      duplicates,
-      events,
-      uptime: sys.uptime,
-    });
-
-    // Push snapshot
-    makeRequest(conn, 'POST', '/snapshot', payload);
-
-    // Check for pending kill commands
+    const payload = buildSnapshotPayload(sys, procs);
     const myHostname = store.get('remote.machineName') || os.hostname();
-    const hostHeader = { 'x-hostname': myHostname };
-    const killConn = { ...conn, headers: { ...conn.headers, ...hostHeader } };
-    makeRequest(killConn, 'GET', '/pending-kills', null, (res) => {
-      let body = '';
-      res.on('data', chunk => { body += chunk; });
-      res.on('end', () => {
-        try {
-          const kills = JSON.parse(body);
-          for (const k of kills) {
-            if (k.pid) killProcess(k.pid);
-          }
-        } catch (e) {}
-      });
-    });
+    const isCloud = serverAddress.includes('cloudnimbusllc.com') || serverAddress.includes('nimbus');
 
-    // Check for pending remote commands
-    const cmdConn = { ...conn, headers: { ...conn.headers, ...hostHeader } };
-    makeRequest(cmdConn, 'GET', '/pending-commands', null, (cmdRes) => {
-      let cmdBody = '';
-      cmdRes.on('data', chunk => { cmdBody += chunk; });
-      cmdRes.on('end', () => {
-        try {
-          const cmds = JSON.parse(cmdBody);
-          for (const cmd of cmds) {
-            exec(cmd.command, { timeout: 30000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
-              const resultPayload = JSON.stringify({
-                hostname: myHostname,
-                cmdId: cmd.id,
-                stdout: (stdout || '').slice(0, 500000),
-                stderr: (stderr || '').slice(0, 100000),
-                exitCode: err ? err.code || 1 : 0,
-              });
-              makeRequest(conn, 'POST', '/command-result', resultPayload);
-            });
-          }
-        } catch (e) {}
-      });
+    // Push snapshot — handle 401 for auto-registration
+    makeRequest(conn, 'POST', '/snapshot', payload, (res) => {
+      if (res.statusCode === 401 && isCloud && !store.get('remote.apiKey')) {
+        // No API key — auto-register
+        autoRegister(conn, (newKey) => {
+          // Retry with new key
+          const authedConn = { ...conn, headers: { ...conn.headers, 'Authorization': `Bearer ${newKey}` } };
+          makeRequest(authedConn, 'POST', '/snapshot', payload);
+          pollServerForCommands(authedConn, myHostname);
+        });
+      } else {
+        res.resume();
+        pollServerForCommands(conn, myHostname);
+      }
     });
   } catch (e) { /* silent */ }
 }
