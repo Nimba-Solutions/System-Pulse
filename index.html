@@ -1,0 +1,1080 @@
+<!--
+  @name         System Pulse
+  @license      BSL 1.1 — See LICENSE.md
+  @description  Dashboard UI — real-time system diagnostics and health monitoring.
+  @author       Cloud Nimbus LLC
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Pulse</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0e0b1a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 16px 20px;
+      user-select: none;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #1a1730; }
+    ::-webkit-scrollbar-thumb { background: #3a3555; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4a4565; }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .header h1 span { color: #f59e0b; }
+    .health-badge {
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .health-badge.ok { background: #1c3a1c; color: #44cc44; border: 1px solid #2a5a2a; }
+    .health-badge.warning { background: #3a2a0a; color: #f59e0b; border: 1px solid #5a4a1a; }
+    .health-badge.critical { background: #4a1c1c; color: #ef4444; border: 1px solid #6a2a2a; }
+
+    .branding {
+      font-size: 11px;
+      color: #555;
+    }
+    .branding a { color: #f59e0b55; text-decoration: none; }
+    .branding a:hover { color: #f59e0b; }
+
+    /* Overview Strip */
+    .overview-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat-card {
+      background: #16132a;
+      border: 1px solid #2a2545;
+      border-radius: 10px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+    .stat-card .stat-label {
+      font-size: 11px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .stat-card .stat-value {
+      font-size: 26px;
+      font-weight: 700;
+      color: #f59e0b;
+    }
+    .stat-card .stat-sub {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+
+    /* Main Grid */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .main-grid.full { grid-template-columns: 1fr; }
+
+    /* Cards */
+    .card {
+      background: #16132a;
+      border: 1px solid #2a2545;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .card-header h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #ccc;
+    }
+
+    /* CPU History Canvas */
+    #cpuCanvas {
+      width: 100%;
+      height: 120px;
+      border-radius: 8px;
+      background: #0e0b1a;
+    }
+    .cpu-current {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .cpu-current .big-num {
+      font-size: 42px;
+      font-weight: 700;
+      color: #f59e0b;
+      line-height: 1;
+    }
+    .cpu-current .unit {
+      font-size: 18px;
+      color: #f59e0b88;
+    }
+    .cpu-current .label {
+      font-size: 12px;
+      color: #888;
+    }
+
+    /* Memory Breakdown */
+    .mem-bar-container {
+      margin-bottom: 12px;
+    }
+    .mem-bar {
+      width: 100%;
+      height: 20px;
+      border-radius: 10px;
+      background: #0e0b1a;
+      overflow: hidden;
+      display: flex;
+    }
+    .mem-bar .used {
+      background: linear-gradient(90deg, #f59e0b, #ef4444);
+      height: 100%;
+      transition: width 0.5s ease;
+    }
+    .mem-bar .cached {
+      background: #f59e0b44;
+      height: 100%;
+      transition: width 0.5s ease;
+    }
+    .mem-bar .free {
+      background: #1c3a1c44;
+      height: 100%;
+      flex: 1;
+    }
+    .mem-labels {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 6px;
+      font-size: 11px;
+      color: #888;
+    }
+    .mem-legend {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 8px;
+      font-size: 11px;
+      color: #888;
+    }
+    .mem-legend .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+    .mem-legend .dot.used { background: #f59e0b; }
+    .mem-legend .dot.free { background: #1c3a1c; }
+
+    .mem-hogs {
+      list-style: none;
+    }
+    .mem-hogs li {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 12px;
+      border-bottom: 1px solid #1a1730;
+    }
+    .mem-hogs li:last-child { border-bottom: none; }
+    .mem-hogs .name { color: #ccc; }
+    .mem-hogs .val { color: #f59e0b; font-weight: 600; }
+
+    /* Network */
+    .net-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .net-stat {
+      text-align: center;
+      padding: 12px;
+      background: #0e0b1a;
+      border-radius: 8px;
+    }
+    .net-stat .direction {
+      font-size: 11px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .net-stat .speed {
+      font-size: 24px;
+      font-weight: 700;
+      color: #f59e0b;
+    }
+    .net-stat .speed-unit {
+      font-size: 12px;
+      color: #f59e0b88;
+      margin-left: 2px;
+    }
+    .net-stat.download .speed { color: #22d3ee; }
+    .net-stat.download .speed-unit { color: #22d3ee88; }
+
+    /* Process Table */
+    .process-table-wrap {
+      max-height: 380px;
+      overflow-y: auto;
+    }
+    .process-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .process-table th {
+      text-align: left;
+      padding: 8px 10px;
+      color: #888;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid #2a2545;
+      cursor: pointer;
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      background: #16132a;
+      z-index: 1;
+    }
+    .process-table th:hover { color: #f59e0b; }
+    .process-table th.sorted { color: #f59e0b; }
+    .process-table th .sort-arrow { margin-left: 4px; font-size: 9px; }
+    .process-table td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #1a1730;
+      white-space: nowrap;
+    }
+    .process-table tr:hover { background: #1a1730; }
+    .process-table .cpu-high { color: #ef4444; font-weight: 600; }
+    .process-table .cpu-med { color: #f59e0b; font-weight: 600; }
+    .process-table .cpu-low { color: #888; }
+
+    .kill-btn {
+      padding: 2px 8px;
+      border: 1px solid #ef444488;
+      border-radius: 4px;
+      background: transparent;
+      color: #ef4444;
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .kill-btn:hover { background: #ef444433; }
+
+    /* Diagnostics */
+    .diag-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .diag-btn {
+      padding: 8px 16px;
+      border: 1px solid #f59e0b;
+      border-radius: 6px;
+      background: #f59e0b22;
+      color: #f59e0b;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .diag-btn:hover { background: #f59e0b44; }
+    .diag-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .diag-btn.danger {
+      border-color: #ef4444;
+      background: #ef444422;
+      color: #ef4444;
+    }
+    .diag-btn.danger:hover { background: #ef444444; }
+
+    .findings-list {
+      list-style: none;
+    }
+    .finding-item {
+      display: flex;
+      gap: 10px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      align-items: flex-start;
+    }
+    .finding-item.critical {
+      background: #4a1c1c44;
+      border: 1px solid #ef444444;
+    }
+    .finding-item.warning {
+      background: #3a2a0a44;
+      border: 1px solid #f59e0b44;
+    }
+    .finding-item.ok {
+      background: #1c3a1c44;
+      border: 1px solid #44cc4444;
+    }
+    .finding-severity {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .finding-severity.critical { background: #ef444444; color: #ef4444; }
+    .finding-severity.warning { background: #f59e0b44; color: #f59e0b; }
+    .finding-severity.ok { background: #44cc4444; color: #44cc44; }
+    .finding-body {
+      flex: 1;
+    }
+    .finding-msg {
+      font-size: 13px;
+      color: #ccc;
+      margin-bottom: 3px;
+    }
+    .finding-suggestion {
+      font-size: 11px;
+      color: #888;
+    }
+    .finding-actions {
+      flex-shrink: 0;
+    }
+    .finding-action-btn {
+      padding: 3px 10px;
+      border: 1px solid #f59e0b88;
+      border-radius: 4px;
+      background: transparent;
+      color: #f59e0b;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .finding-action-btn:hover { background: #f59e0b22; }
+
+    /* Confirm Dialog */
+    .confirm-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .confirm-overlay.active { display: flex; }
+    .confirm-dialog {
+      background: #1e1a35;
+      border: 1px solid #3a3555;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 400px;
+      width: 90%;
+      text-align: center;
+    }
+    .confirm-dialog h3 {
+      color: #fff;
+      margin-bottom: 12px;
+      font-size: 16px;
+    }
+    .confirm-dialog p {
+      color: #aaa;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .confirm-btns {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+    .confirm-btns button {
+      padding: 8px 20px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+    }
+    .confirm-btns .btn-cancel {
+      background: #2a2545;
+      color: #ccc;
+    }
+    .confirm-btns .btn-cancel:hover { background: #3a3555; }
+    .confirm-btns .btn-confirm {
+      background: #ef4444;
+      color: #fff;
+    }
+    .confirm-btns .btn-confirm:hover { background: #dc2626; }
+
+    /* Status toast */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 200;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.success { background: #1c3a1c; border: 1px solid #44cc44; color: #44cc44; }
+    .toast.error { background: #4a1c1c; border: 1px solid #ef4444; color: #ef4444; }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 16px;
+      background: #16132a;
+      border-radius: 8px;
+      padding: 4px;
+      border: 1px solid #2a2545;
+    }
+    .tab-btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #888;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .tab-btn:hover { color: #ccc; background: #1a1730; }
+    .tab-btn.active { color: #f59e0b; background: #f59e0b1a; }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <h1><span>System</span> Pulse</h1>
+    <span class="health-badge ok" id="healthBadge">HEALTHY</span>
+  </div>
+  <div class="branding">
+    Powered by <a href="https://cloudnimbus.dev" target="_blank">Cloud Nimbus LLC</a>
+  </div>
+</div>
+
+<!-- Overview Strip -->
+<div class="overview-strip">
+  <div class="stat-card">
+    <div class="stat-label">CPU Usage</div>
+    <div class="stat-value" id="cpuStat">--%</div>
+    <div class="stat-sub" id="cpuModel">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Memory</div>
+    <div class="stat-value" id="memStat">--</div>
+    <div class="stat-sub" id="memDetail">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Network</div>
+    <div class="stat-value" id="netStat">--</div>
+    <div class="stat-sub" id="netDetail">Up / Down</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Uptime</div>
+    <div class="stat-value" id="uptimeStat">--</div>
+    <div class="stat-sub" id="hostDetail">--</div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+  <button class="tab-btn" data-tab="processes">Processes</button>
+  <button class="tab-btn" data-tab="diagnostics">Diagnostics</button>
+</div>
+
+<!-- Dashboard Tab -->
+<div class="tab-content active" id="tab-dashboard">
+  <div class="main-grid">
+    <!-- CPU History -->
+    <div class="card">
+      <div class="card-header">
+        <h3>CPU History</h3>
+      </div>
+      <div class="cpu-current">
+        <span class="big-num" id="cpuBigNum">0</span>
+        <span class="unit">%</span>
+        <span class="label">current</span>
+      </div>
+      <canvas id="cpuCanvas"></canvas>
+    </div>
+
+    <!-- Memory Breakdown -->
+    <div class="card">
+      <div class="card-header">
+        <h3>Memory Breakdown</h3>
+      </div>
+      <div class="mem-legend">
+        <span><span class="dot used"></span> Used</span>
+        <span><span class="dot free"></span> Free</span>
+      </div>
+      <div class="mem-bar-container">
+        <div class="mem-bar">
+          <div class="used" id="memBarUsed" style="width: 0%"></div>
+          <div class="free"></div>
+        </div>
+        <div class="mem-labels">
+          <span id="memBarUsedLabel">0 GB used</span>
+          <span id="memBarFreeLabel">0 GB free</span>
+        </div>
+      </div>
+      <h3 style="font-size: 12px; color: #888; margin: 12px 0 8px; text-transform: uppercase; letter-spacing: 0.5px;">Top Memory Consumers</h3>
+      <ul class="mem-hogs" id="memHogsList">
+        <li><span class="name">Loading...</span></li>
+      </ul>
+    </div>
+
+    <!-- Network Activity -->
+    <div class="card">
+      <div class="card-header">
+        <h3>Network Activity</h3>
+      </div>
+      <div class="net-stats">
+        <div class="net-stat">
+          <div class="direction">Upload</div>
+          <div><span class="speed" id="netUpSpeed">0.00</span><span class="speed-unit">Mbps</span></div>
+        </div>
+        <div class="net-stat download">
+          <div class="direction">Download</div>
+          <div><span class="speed" id="netDownSpeed">0.00</span><span class="speed-unit">Mbps</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Diagnostics Summary -->
+    <div class="card">
+      <div class="card-header">
+        <h3>Quick Health</h3>
+      </div>
+      <div id="quickHealth">
+        <p style="font-size: 13px; color: #888;">Click "Run Diagnostic" in the Diagnostics tab for a full analysis.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Processes Tab -->
+<div class="tab-content" id="tab-processes">
+  <div class="card">
+    <div class="card-header">
+      <h3>Top Processes</h3>
+      <span style="font-size: 11px; color: #666;">Updates every 3s | Click headers to sort</span>
+    </div>
+    <div class="process-table-wrap">
+      <table class="process-table">
+        <thead>
+          <tr>
+            <th data-sort="name">Name <span class="sort-arrow"></span></th>
+            <th data-sort="pid">PID <span class="sort-arrow"></span></th>
+            <th data-sort="cpu" class="sorted">CPU% <span class="sort-arrow">&#9660;</span></th>
+            <th data-sort="memMB">Mem MB <span class="sort-arrow"></span></th>
+            <th data-sort="status">Status <span class="sort-arrow"></span></th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="processTableBody">
+          <tr><td colspan="6" style="text-align: center; color: #666; padding: 20px;">Loading processes...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Diagnostics Tab -->
+<div class="tab-content" id="tab-diagnostics">
+  <div class="card">
+    <div class="card-header">
+      <h3>System Diagnostics</h3>
+    </div>
+    <div class="diag-actions">
+      <button class="diag-btn" id="runDiagBtn" onclick="runDiagnostic()">Run Diagnostic</button>
+      <button class="diag-btn danger" id="killDupsBtn" onclick="findAndKillDuplicates()">Kill All Duplicates</button>
+    </div>
+    <ul class="findings-list" id="findingsList">
+      <li class="finding-item ok">
+        <span class="finding-severity ok">Ready</span>
+        <div class="finding-body">
+          <div class="finding-msg">Click "Run Diagnostic" to scan your system for issues.</div>
+          <div class="finding-suggestion">Checks for high CPU, memory pressure, duplicate processes, and more.</div>
+        </div>
+      </li>
+    </ul>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-dialog">
+    <h3 id="confirmTitle">Confirm Action</h3>
+    <p id="confirmMsg">Are you sure?</p>
+    <div class="confirm-btns">
+      <button class="btn-cancel" onclick="closeConfirm()">Cancel</button>
+      <button class="btn-confirm" id="confirmBtn" onclick="confirmAction()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────────
+const cpuHistory = [];
+const CPU_HISTORY_MAX = 60;
+let currentProcesses = [];
+let sortField = 'cpu';
+let sortAsc = false;
+let pendingConfirmAction = null;
+
+// ─── Tabs ───────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ─── Formatting ─────────────────────────────────────────────────────────────
+function formatBytes(bytes) {
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return gb.toFixed(1) + ' GB';
+  return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
+}
+
+function formatUptime(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function cpuClass(pct) {
+  if (pct >= 50) return 'cpu-high';
+  if (pct >= 20) return 'cpu-med';
+  return 'cpu-low';
+}
+
+// ─── Toast ──────────────────────────────────────────────────────────────────
+function showToast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + type + ' show';
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ─── Confirm Dialog ─────────────────────────────────────────────────────────
+function showConfirm(title, msg, action) {
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMsg').textContent = msg;
+  pendingConfirmAction = action;
+  document.getElementById('confirmOverlay').classList.add('active');
+}
+
+function closeConfirm() {
+  document.getElementById('confirmOverlay').classList.remove('active');
+  pendingConfirmAction = null;
+}
+
+function confirmAction() {
+  if (pendingConfirmAction) pendingConfirmAction();
+  closeConfirm();
+}
+
+// ─── System Info Polling (2s) ───────────────────────────────────────────────
+async function pollSystemInfo() {
+  try {
+    const info = await window.api.getSystemInfo();
+    if (!info) return;
+
+    // CPU stat
+    document.getElementById('cpuStat').textContent = info.cpuPercent + '%';
+    document.getElementById('cpuModel').textContent = info.cpuCores + ' cores';
+    document.getElementById('cpuBigNum').textContent = info.cpuPercent;
+
+    // CPU history
+    cpuHistory.push(info.cpuPercent);
+    if (cpuHistory.length > CPU_HISTORY_MAX) cpuHistory.shift();
+    drawCpuGraph();
+
+    // Memory stat
+    const memPct = Math.round((info.usedMem / info.totalMem) * 100);
+    document.getElementById('memStat').textContent = memPct + '%';
+    document.getElementById('memDetail').textContent = formatBytes(info.usedMem) + ' / ' + formatBytes(info.totalMem);
+
+    // Memory bar
+    document.getElementById('memBarUsed').style.width = memPct + '%';
+    document.getElementById('memBarUsedLabel').textContent = formatBytes(info.usedMem) + ' used';
+    document.getElementById('memBarFreeLabel').textContent = formatBytes(info.freeMem) + ' free';
+
+    // Uptime
+    document.getElementById('uptimeStat').textContent = formatUptime(info.uptime);
+    document.getElementById('hostDetail').textContent = info.hostname;
+
+  } catch (e) {
+    console.error('System info poll error:', e);
+  }
+}
+
+// ─── Network Polling (2s) ───────────────────────────────────────────────────
+async function pollNetwork() {
+  try {
+    const net = await window.api.getNetworkUsage();
+    if (!net) return;
+
+    document.getElementById('netUpSpeed').textContent = net.totalUpMbps;
+    document.getElementById('netDownSpeed').textContent = net.totalDownMbps;
+    document.getElementById('netStat').textContent = net.totalDownMbps;
+    document.getElementById('netDetail').textContent = 'Up: ' + net.totalUpMbps + ' / Down: ' + net.totalDownMbps + ' Mbps';
+  } catch (e) {
+    console.error('Network poll error:', e);
+  }
+}
+
+// ─── Process Polling (3s) ───────────────────────────────────────────────────
+async function pollProcesses() {
+  try {
+    const procs = await window.api.getProcesses();
+    if (!procs) return;
+    currentProcesses = procs;
+    renderProcessTable();
+    updateMemHogs(procs);
+  } catch (e) {
+    console.error('Process poll error:', e);
+  }
+}
+
+function renderProcessTable() {
+  const sorted = [...currentProcesses].sort((a, b) => {
+    let va = a[sortField], vb = b[sortField];
+    if (typeof va === 'string') va = va.toLowerCase();
+    if (typeof vb === 'string') vb = vb.toLowerCase();
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  const tbody = document.getElementById('processTableBody');
+  tbody.innerHTML = sorted.map(p => `
+    <tr>
+      <td title="${p.name}">${p.name.length > 30 ? p.name.slice(0, 30) + '...' : p.name}</td>
+      <td>${p.pid}</td>
+      <td class="${cpuClass(p.cpu)}">${p.cpu}%</td>
+      <td>${p.memMB}</td>
+      <td>${p.status}</td>
+      <td><button class="kill-btn" onclick="killProcessConfirm(${p.pid}, '${p.name.replace(/'/g, "\\'")}')">Kill</button></td>
+    </tr>
+  `).join('');
+
+  // Update header sort indicators
+  document.querySelectorAll('.process-table th[data-sort]').forEach(th => {
+    const arrow = th.querySelector('.sort-arrow');
+    if (th.dataset.sort === sortField) {
+      th.classList.add('sorted');
+      arrow.innerHTML = sortAsc ? '&#9650;' : '&#9660;';
+    } else {
+      th.classList.remove('sorted');
+      arrow.innerHTML = '';
+    }
+  });
+}
+
+function updateMemHogs(procs) {
+  const byMem = [...procs].sort((a, b) => b.memMB - a.memMB).slice(0, 5);
+  const list = document.getElementById('memHogsList');
+  list.innerHTML = byMem.map(p => `
+    <li>
+      <span class="name">${p.name}</span>
+      <span class="val">${p.memMB} MB</span>
+    </li>
+  `).join('');
+}
+
+// Sort click handler
+document.querySelectorAll('.process-table th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const field = th.dataset.sort;
+    if (sortField === field) {
+      sortAsc = !sortAsc;
+    } else {
+      sortField = field;
+      sortAsc = field === 'name'; // Default asc for name, desc for others
+    }
+    renderProcessTable();
+  });
+});
+
+// ─── Kill Process ───────────────────────────────────────────────────────────
+function killProcessConfirm(pid, name) {
+  showConfirm(
+    'Kill Process',
+    `Are you sure you want to kill "${name}" (PID ${pid})?`,
+    async () => {
+      const result = await window.api.killProcess(pid);
+      if (result.success) {
+        showToast(`Killed ${name} (PID ${pid})`, 'success');
+        pollProcesses();
+      } else {
+        showToast(`Failed to kill: ${result.error}`, 'error');
+      }
+    }
+  );
+}
+
+// ─── Diagnostics ────────────────────────────────────────────────────────────
+async function runDiagnostic() {
+  const btn = document.getElementById('runDiagBtn');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+
+  try {
+    const findings = await window.api.runDiagnostic();
+    renderFindings(findings);
+    updateQuickHealth(findings);
+  } catch (e) {
+    console.error('Diagnostic error:', e);
+    showToast('Diagnostic scan failed', 'error');
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Run Diagnostic';
+}
+
+function renderFindings(findings) {
+  const list = document.getElementById('findingsList');
+  list.innerHTML = findings.map(f => {
+    let actionHtml = '';
+    if (f.pid) {
+      actionHtml = `<button class="finding-action-btn" onclick="killProcessConfirm(${f.pid}, '${(f.processName || '').replace(/'/g, "\\'")}')">Kill</button>`;
+    }
+    if (f.canKillDuplicates) {
+      actionHtml = `<button class="finding-action-btn" onclick="killDuplicatesConfirm('${(f.processName || '').replace(/'/g, "\\'")}')">Kill Duplicates</button>`;
+    }
+    return `
+      <li class="finding-item ${f.severity}">
+        <span class="finding-severity ${f.severity}">${f.severity}</span>
+        <div class="finding-body">
+          <div class="finding-msg">${f.message}</div>
+          <div class="finding-suggestion">${f.suggestion}</div>
+        </div>
+        ${actionHtml ? `<div class="finding-actions">${actionHtml}</div>` : ''}
+      </li>
+    `;
+  }).join('');
+}
+
+function updateQuickHealth(findings) {
+  const qh = document.getElementById('quickHealth');
+  const critCount = findings.filter(f => f.severity === 'critical').length;
+  const warnCount = findings.filter(f => f.severity === 'warning').length;
+
+  if (critCount === 0 && warnCount === 0) {
+    qh.innerHTML = '<p style="font-size: 14px; color: #44cc44;">No issues detected. System is healthy.</p>';
+  } else {
+    let html = '<div style="font-size: 13px;">';
+    if (critCount > 0) html += `<p style="color: #ef4444; margin-bottom: 4px;">${critCount} critical issue(s)</p>`;
+    if (warnCount > 0) html += `<p style="color: #f59e0b; margin-bottom: 4px;">${warnCount} warning(s)</p>`;
+    html += '<p style="color: #888; font-size: 11px; margin-top: 8px;">See Diagnostics tab for details.</p></div>';
+    qh.innerHTML = html;
+  }
+}
+
+function killDuplicatesConfirm(name) {
+  showConfirm(
+    'Kill Duplicates',
+    `Kill all duplicate instances of "${name}"? The oldest instance will be kept.`,
+    async () => {
+      const result = await window.api.killDuplicates(name);
+      if (result.success) {
+        showToast(result.message, 'success');
+        pollProcesses();
+        runDiagnostic();
+      } else {
+        showToast(`Failed: ${result.error}`, 'error');
+      }
+    }
+  );
+}
+
+async function findAndKillDuplicates() {
+  // First find duplicates from current process list
+  const nameCounts = {};
+  for (const p of currentProcesses) {
+    nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
+  }
+  const systemProcs = ['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe'];
+  const dupes = Object.entries(nameCounts)
+    .filter(([name, count]) => count >= 3 && !systemProcs.includes(name))
+    .map(([name, count]) => `${name} (${count}x)`);
+
+  if (dupes.length === 0) {
+    showToast('No duplicate processes found', 'success');
+    return;
+  }
+
+  showConfirm(
+    'Kill All Duplicates',
+    `Found duplicates: ${dupes.join(', ')}. Kill extras of each?`,
+    async () => {
+      for (const [name, count] of Object.entries(nameCounts)) {
+        if (count >= 3 && !systemProcs.includes(name)) {
+          await window.api.killDuplicates(name);
+        }
+      }
+      showToast('Cleaned up duplicate processes', 'success');
+      pollProcesses();
+    }
+  );
+}
+
+// ─── CPU Graph ──────────────────────────────────────────────────────────────
+function drawCpuGraph() {
+  const canvas = document.getElementById('cpuCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+
+  // Set actual size in memory
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width;
+  const h = rect.height;
+  const pad = 2;
+
+  // Clear
+  ctx.clearRect(0, 0, w, h);
+
+  if (cpuHistory.length < 2) return;
+
+  // Grid lines
+  ctx.strokeStyle = '#2a254522';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + ((h - pad * 2) * i / 4);
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(w - pad, y);
+    ctx.stroke();
+  }
+
+  // Draw line
+  const step = (w - pad * 2) / (CPU_HISTORY_MAX - 1);
+  const points = cpuHistory.map((v, i) => ({
+    x: pad + (i + CPU_HISTORY_MAX - cpuHistory.length) * step,
+    y: pad + (h - pad * 2) * (1 - v / 100),
+  }));
+
+  // Gradient fill
+  const gradient = ctx.createLinearGradient(0, 0, 0, h);
+  gradient.addColorStop(0, '#f59e0b44');
+  gradient.addColorStop(1, '#f59e0b00');
+
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, h - pad);
+  for (const p of points) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(points[points.length - 1].x, h - pad);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Line stroke
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Current value dot
+  const last = points[points.length - 1];
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#f59e0b';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 6, 0, Math.PI * 2);
+  ctx.strokeStyle = '#f59e0b44';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+// ─── Health Badge Update ────────────────────────────────────────────────────
+window.api.onTrayHealthUpdate((health) => {
+  const badge = document.getElementById('healthBadge');
+  badge.className = 'health-badge ' + health.level;
+  const labels = { ok: 'HEALTHY', warning: 'WARNING', critical: 'CRITICAL' };
+  badge.textContent = labels[health.level] || 'HEALTHY';
+});
+
+// ─── Start Polling ──────────────────────────────────────────────────────────
+pollSystemInfo();
+pollNetwork();
+pollProcesses();
+
+setInterval(pollSystemInfo, 2000);
+setInterval(pollNetwork, 2000);
+setInterval(pollProcesses, 3000);
+
+// Redraw CPU graph on resize
+window.addEventListener('resize', drawCpuGraph);
+</script>
+
+</body>
+</html>

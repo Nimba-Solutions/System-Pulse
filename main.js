@@ -1,0 +1,632 @@
+/**
+ * @name         System Pulse
+ * @license      BSL 1.1 — See LICENSE.md
+ * @description  Electron main process — real-time system diagnostics and health monitoring.
+ *               Cross-platform: Windows (wmic), macOS (ps), Linux (ps, /proc).
+ * @author       Cloud Nimbus LLC
+ */
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { exec } = require('child_process');
+
+const platform = process.platform; // 'win32', 'darwin', 'linux'
+
+const Store = require('electron-store');
+
+const store = new Store({
+  defaults: {
+    windowBounds: { width: 1100, height: 800 },
+  },
+});
+
+let mainWindow = null;
+let tray = null;
+let previousCpuTimes = null;
+let previousProcessSnap = null; // For Windows CPU% delta calc
+let lastNetStats = null;
+let lastNetStatsTime = null;
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function runCmd(cmd, timeout = 5000) {
+  return new Promise((resolve) => {
+    exec(cmd, { timeout, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve('');
+      resolve(stdout || '');
+    });
+  });
+}
+
+// ─── CPU Usage (cross-platform via os.cpus()) ───────────────────────────────
+
+function getCpuUsagePercent() {
+  const cpus = os.cpus();
+  let totalIdle = 0, totalTick = 0;
+  for (const cpu of cpus) {
+    for (const type in cpu.times) totalTick += cpu.times[type];
+    totalIdle += cpu.times.idle;
+  }
+
+  if (previousCpuTimes) {
+    const idleDiff = totalIdle - previousCpuTimes.idle;
+    const totalDiff = totalTick - previousCpuTimes.total;
+    previousCpuTimes = { idle: totalIdle, total: totalTick };
+    if (totalDiff === 0) return 0;
+    return Math.round((1 - idleDiff / totalDiff) * 100);
+  }
+
+  previousCpuTimes = { idle: totalIdle, total: totalTick };
+  return 0; // First call, no delta yet
+}
+
+// ─── System Info ────────────────────────────────────────────────────────────
+
+function getSystemInfo() {
+  const cpuPercent = getCpuUsagePercent();
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const uptime = os.uptime();
+  const loadAvg = os.loadavg();
+  const cpuModel = os.cpus()[0]?.model || 'Unknown';
+  const cpuCores = os.cpus().length;
+
+  return {
+    cpuPercent,
+    totalMem,
+    freeMem,
+    usedMem,
+    uptime,
+    loadAvg,
+    cpuModel,
+    cpuCores,
+    platform,
+    hostname: os.hostname(),
+  };
+}
+
+// ─── Process List ───────────────────────────────────────────────────────────
+
+async function getProcessList() {
+  if (platform === 'win32') {
+    return await getProcessListWindows();
+  } else {
+    return await getProcessListUnix();
+  }
+}
+
+async function getProcessListWindows() {
+  // Use wmic — much lighter than PowerShell for polling
+  const raw = await runCmd(
+    'wmic process get Name,ProcessId,WorkingSetSize,KernelModeTime,UserModeTime /format:csv',
+    8000
+  );
+  if (!raw) return [];
+
+  const lines = raw.split('\n').filter(l => l.trim().length > 0);
+  if (lines.length < 2) return [];
+
+  // CSV header: Node,KernelModeTime,Name,ProcessId,UserModeTime,WorkingSetSize
+  const header = lines[0].trim().split(',').map(h => h.trim());
+  const nameIdx = header.indexOf('Name');
+  const pidIdx = header.indexOf('ProcessId');
+  const wssIdx = header.indexOf('WorkingSetSize');
+  const kernelIdx = header.indexOf('KernelModeTime');
+  const userIdx = header.indexOf('UserModeTime');
+
+  if (nameIdx === -1 || pidIdx === -1) return [];
+
+  const now = Date.now();
+  const currentSnap = new Map();
+  const processes = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].trim().split(',');
+    if (cols.length < header.length) continue;
+
+    const name = cols[nameIdx] || '';
+    const pid = parseInt(cols[pidIdx], 10);
+    const memBytes = parseInt(cols[wssIdx], 10) || 0;
+    const kernelTime = parseInt(cols[kernelIdx], 10) || 0; // 100-ns intervals
+    const userTime = parseInt(cols[userIdx], 10) || 0;
+
+    if (!name || isNaN(pid) || pid === 0) continue;
+
+    const cpuTime = kernelTime + userTime;
+    currentSnap.set(pid, { cpuTime, timestamp: now });
+
+    let cpuPercent = 0;
+    if (previousProcessSnap && previousProcessSnap.has(pid)) {
+      const prev = previousProcessSnap.get(pid);
+      const timeDelta = (now - prev.timestamp) / 1000; // seconds
+      const cpuDelta = (cpuTime - prev.cpuTime) / 10000000; // convert 100ns to seconds
+      if (timeDelta > 0) {
+        cpuPercent = Math.min(100, Math.round((cpuDelta / timeDelta) * 100 / os.cpus().length));
+      }
+    }
+
+    processes.push({
+      name,
+      pid,
+      cpu: cpuPercent,
+      memMB: Math.round(memBytes / 1048576),
+      status: 'Running',
+    });
+  }
+
+  previousProcessSnap = currentSnap;
+
+  // Sort by CPU descending, take top 20
+  processes.sort((a, b) => b.cpu - a.cpu);
+  return processes.slice(0, 20);
+}
+
+async function getProcessListUnix() {
+  const cmd = platform === 'darwin'
+    ? 'ps -Arco pid,pcpu,rss,state,comm | head -25'
+    : 'ps aux --sort=-%cpu | head -25';
+
+  const raw = await runCmd(cmd, 5000);
+  if (!raw) return [];
+
+  const lines = raw.split('\n').filter(l => l.trim().length > 0);
+  if (lines.length < 2) return [];
+
+  const processes = [];
+
+  if (platform === 'darwin') {
+    // ps -Arco: PID %CPU RSS STAT COMM
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length < 5) continue;
+      const pid = parseInt(parts[0], 10);
+      const cpu = parseFloat(parts[1]) || 0;
+      const rssKB = parseInt(parts[2], 10) || 0;
+      const status = parts[3] || 'S';
+      const name = parts.slice(4).join(' ');
+      processes.push({
+        name,
+        pid,
+        cpu: Math.round(cpu),
+        memMB: Math.round(rssKB / 1024),
+        status: status.startsWith('R') ? 'Running' : status.startsWith('S') ? 'Sleeping' : status.startsWith('Z') ? 'Zombie' : status,
+      });
+    }
+  } else {
+    // ps aux: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length < 11) continue;
+      const pid = parseInt(parts[1], 10);
+      const cpu = parseFloat(parts[2]) || 0;
+      const rssKB = parseInt(parts[5], 10) || 0;
+      const status = parts[7] || 'S';
+      const name = parts.slice(10).join(' ').split('/').pop();
+      processes.push({
+        name,
+        pid,
+        cpu: Math.round(cpu),
+        memMB: Math.round(rssKB / 1024),
+        status: status.startsWith('R') ? 'Running' : status.startsWith('S') ? 'Sleeping' : status.startsWith('Z') ? 'Zombie' : status,
+      });
+    }
+  }
+
+  processes.sort((a, b) => b.cpu - a.cpu);
+  return processes.slice(0, 20);
+}
+
+// ─── Kill Process ───────────────────────────────────────────────────────────
+
+async function killProcess(pid) {
+  // Sanitize PID — must be a positive integer
+  const safePid = parseInt(pid, 10);
+  if (isNaN(safePid) || safePid <= 0) {
+    return { success: false, error: 'Invalid PID' };
+  }
+
+  // Don't allow killing PID 0, 1, or 4 (system-critical)
+  if (safePid <= 4) {
+    return { success: false, error: 'Cannot kill system-critical process' };
+  }
+
+  try {
+    const cmd = platform === 'win32'
+      ? `taskkill /F /PID ${safePid}`
+      : `kill -9 ${safePid}`;
+    await runCmd(cmd, 5000);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function killDuplicates(processName) {
+  if (!processName || typeof processName !== 'string') {
+    return { success: false, error: 'Invalid process name' };
+  }
+
+  const allProcesses = await getProcessList();
+  const matches = allProcesses.filter(p => p.name === processName);
+
+  if (matches.length <= 1) {
+    return { success: true, killed: 0, message: 'No duplicates found' };
+  }
+
+  // Keep the one with lowest PID (oldest), kill the rest
+  matches.sort((a, b) => a.pid - b.pid);
+  let killed = 0;
+
+  for (let i = 1; i < matches.length; i++) {
+    const result = await killProcess(matches[i].pid);
+    if (result.success) killed++;
+  }
+
+  return { success: true, killed, message: `Killed ${killed} duplicate(s) of ${processName}` };
+}
+
+// ─── Network Usage ──────────────────────────────────────────────────────────
+
+async function getNetworkUsage() {
+  try {
+    if (platform === 'win32') {
+      // Use wmic instead of PowerShell for lightweight polling
+      const raw = await runCmd(
+        'wmic path Win32_PerfRawData_Tcpip_NetworkInterface get Name,BytesReceivedPersec,BytesSentPersec /format:csv',
+        5000
+      );
+      if (!raw) return null;
+
+      const lines = raw.split('\n').filter(l => l.trim().length > 0);
+      if (lines.length < 2) return null;
+
+      const header = lines[0].trim().split(',').map(h => h.trim());
+      const nameIdx = header.indexOf('Name');
+      const recvIdx = header.indexOf('BytesReceivedPersec');
+      const sentIdx = header.indexOf('BytesSentPersec');
+
+      if (nameIdx === -1) return null;
+
+      const stats = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].trim().split(',');
+        if (cols.length < header.length) continue;
+        const name = cols[nameIdx];
+        const receivedBytes = parseInt(cols[recvIdx], 10) || 0;
+        const sentBytes = parseInt(cols[sentIdx], 10) || 0;
+        if (name) stats.push({ Name: name, SentBytes: sentBytes, ReceivedBytes: receivedBytes });
+      }
+
+      return computeNetDelta(stats);
+
+    } else if (platform === 'darwin') {
+      const raw = await runCmd('/usr/sbin/netstat -ib', 5000);
+      const lines = raw.split('\n');
+      const stats = [];
+      for (const line of lines.slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 11) continue;
+        if (!parts[3] || !parts[3].startsWith('Link#')) continue;
+        stats.push({
+          Name: parts[0],
+          SentBytes: parseInt(parts[9], 10) || 0,
+          ReceivedBytes: parseInt(parts[6], 10) || 0,
+        });
+      }
+      return computeNetDelta(stats);
+
+    } else {
+      // Linux: /proc/net/dev
+      let raw = '';
+      try { raw = fs.readFileSync('/proc/net/dev', 'utf8'); } catch { return null; }
+      const lines = raw.split('\n');
+      const stats = [];
+      for (const line of lines.slice(2)) {
+        const match = line.trim().match(/^(\S+):\s+(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/);
+        if (!match) continue;
+        if (match[1] === 'lo') continue;
+        stats.push({
+          Name: match[1],
+          SentBytes: parseInt(match[3], 10),
+          ReceivedBytes: parseInt(match[2], 10),
+        });
+      }
+      return computeNetDelta(stats);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function computeNetDelta(stats) {
+  if (!stats || stats.length === 0) return null;
+  const now = Date.now();
+
+  if (lastNetStats && lastNetStatsTime) {
+    const elapsed = (now - lastNetStatsTime) / 1000;
+    let totalUpMbps = 0, totalDownMbps = 0;
+    const adapters = stats.map((s) => {
+      const prev = lastNetStats.find(p => p.Name === s.Name);
+      if (!prev) return { name: s.Name, uploadMbps: 0, downloadMbps: 0 };
+      const upBytes = Math.max(0, s.SentBytes - prev.SentBytes);
+      const downBytes = Math.max(0, s.ReceivedBytes - prev.ReceivedBytes);
+      const uploadMbps = parseFloat(((upBytes * 8 / 1000000) / elapsed).toFixed(2));
+      const downloadMbps = parseFloat(((downBytes * 8 / 1000000) / elapsed).toFixed(2));
+      totalUpMbps += uploadMbps;
+      totalDownMbps += downloadMbps;
+      return { name: s.Name, uploadMbps, downloadMbps };
+    });
+    lastNetStats = stats;
+    lastNetStatsTime = now;
+    return { adapters, totalUpMbps: totalUpMbps.toFixed(2), totalDownMbps: totalDownMbps.toFixed(2) };
+  }
+
+  lastNetStats = stats;
+  lastNetStatsTime = now;
+  return { adapters: stats.map(s => ({ name: s.Name, uploadMbps: 0, downloadMbps: 0 })), totalUpMbps: '0.00', totalDownMbps: '0.00' };
+}
+
+// ─── Diagnostics ────────────────────────────────────────────────────────────
+
+async function runDiagnostic() {
+  const findings = [];
+  const sysInfo = getSystemInfo();
+  const processes = await getProcessList();
+
+  // Check high CPU
+  const highCpuProcs = processes.filter(p => p.cpu > 50);
+  for (const p of highCpuProcs) {
+    findings.push({
+      severity: p.cpu > 80 ? 'critical' : 'warning',
+      category: 'CPU',
+      message: `${p.name} (PID ${p.pid}) is using ${p.cpu}% CPU`,
+      suggestion: `Consider killing this process or investigating why it's consuming so much CPU`,
+      pid: p.pid,
+      processName: p.name,
+    });
+  }
+
+  // Check memory usage > 90%
+  const memPercent = Math.round((sysInfo.usedMem / sysInfo.totalMem) * 100);
+  if (memPercent > 90) {
+    findings.push({
+      severity: 'critical',
+      category: 'Memory',
+      message: `System memory usage is at ${memPercent}%`,
+      suggestion: 'Close unnecessary applications to free memory',
+    });
+  } else if (memPercent > 75) {
+    findings.push({
+      severity: 'warning',
+      category: 'Memory',
+      message: `System memory usage is at ${memPercent}%`,
+      suggestion: 'Consider closing some applications',
+    });
+  }
+
+  // Check for duplicate processes
+  const nameCounts = {};
+  for (const p of processes) {
+    nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
+  }
+  for (const [name, count] of Object.entries(nameCounts)) {
+    if (count >= 3) {
+      // Ignore common system processes that legitimately have many instances
+      const systemProcs = ['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe'];
+      if (!systemProcs.includes(name)) {
+        findings.push({
+          severity: 'warning',
+          category: 'Duplicates',
+          message: `${count} instances of ${name} found`,
+          suggestion: `Kill duplicates? Keep oldest instance.`,
+          processName: name,
+          canKillDuplicates: true,
+        });
+      }
+    }
+  }
+
+  // Check for zombie processes (Unix only)
+  if (platform !== 'win32') {
+    const zombies = processes.filter(p => p.status === 'Zombie');
+    for (const z of zombies) {
+      findings.push({
+        severity: 'warning',
+        category: 'Zombie',
+        message: `Zombie process: ${z.name} (PID ${z.pid})`,
+        suggestion: 'This process is defunct and should be cleaned up',
+        pid: z.pid,
+        processName: z.name,
+      });
+    }
+  }
+
+  // Check top memory hogs
+  const topMemProcs = [...processes].sort((a, b) => b.memMB - a.memMB).slice(0, 3);
+  for (const p of topMemProcs) {
+    if (p.memMB > 1024) { // >1GB
+      findings.push({
+        severity: 'warning',
+        category: 'Memory',
+        message: `${p.name} (PID ${p.pid}) is using ${p.memMB} MB of memory`,
+        suggestion: 'This process is consuming significant memory',
+        pid: p.pid,
+        processName: p.name,
+      });
+    }
+  }
+
+  // Overall system health
+  const overallCpu = sysInfo.cpuPercent;
+  if (overallCpu > 90) {
+    findings.push({
+      severity: 'critical',
+      category: 'CPU',
+      message: `Overall CPU usage is at ${overallCpu}%`,
+      suggestion: 'System is under heavy load — check top processes',
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      severity: 'ok',
+      category: 'System',
+      message: 'System health looks good — no issues detected',
+      suggestion: '',
+    });
+  }
+
+  return findings;
+}
+
+// ─── System Health for Tray ─────────────────────────────────────────────────
+
+function getHealthLevel() {
+  const cpuPercent = getCpuUsagePercent();
+  const memPercent = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
+
+  if (cpuPercent > 90 || memPercent > 95) return { level: 'critical', cpuPercent, memPercent };
+  if (cpuPercent > 70 || memPercent > 85) return { level: 'warning', cpuPercent, memPercent };
+  return { level: 'ok', cpuPercent, memPercent };
+}
+
+// ─── Tray Icon Generation ───────────────────────────────────────────────────
+
+function createTrayIcon(color) {
+  // Create a 16x16 icon using nativeImage
+  const size = 16;
+  const canvas = Buffer.alloc(size * size * 4);
+
+  const colors = {
+    green: [68, 204, 68],
+    yellow: [245, 158, 11],
+    red: [239, 68, 68],
+  };
+
+  const [r, g, b] = colors[color] || colors.green;
+
+  // Draw a filled circle
+  const cx = size / 2, cy = size / 2, radius = 6;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+      const idx = (y * size + x) * 4;
+      if (dist <= radius) {
+        const alpha = dist > radius - 1 ? Math.round((radius - dist) * 255) : 255;
+        canvas[idx] = r;
+        canvas[idx + 1] = g;
+        canvas[idx + 2] = b;
+        canvas[idx + 3] = alpha;
+      } else {
+        canvas[idx] = 0;
+        canvas[idx + 1] = 0;
+        canvas[idx + 2] = 0;
+        canvas[idx + 3] = 0;
+      }
+    }
+  }
+
+  return nativeImage.createFromBuffer(canvas, { width: size, height: size });
+}
+
+// ─── Window & Tray ──────────────────────────────────────────────────────────
+
+function createWindow() {
+  const bounds = store.get('windowBounds');
+  mainWindow = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: 800,
+    minHeight: 600,
+    backgroundColor: '#0e0b1a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    icon: path.join(__dirname, 'icon.png'),
+    show: false,
+  });
+
+  mainWindow.loadFile('index.html');
+  mainWindow.setMenuBarVisibility(false);
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  mainWindow.on('resize', () => {
+    const { width, height } = mainWindow.getBounds();
+    store.set('windowBounds', { width, height });
+  });
+
+  mainWindow.on('close', (e) => {
+    if (!app.isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
+}
+
+function createTray() {
+  const icon = createTrayIcon('green');
+  tray = new Tray(icon);
+  tray.setToolTip('System Pulse — CPU: ...');
+
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Show System Pulse', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+  tray.on('double-click', () => { mainWindow?.show(); mainWindow?.focus(); });
+
+  // Update tray icon color periodically
+  setInterval(() => {
+    const health = getHealthLevel();
+    const colorMap = { ok: 'green', warning: 'yellow', critical: 'red' };
+    const newIcon = createTrayIcon(colorMap[health.level]);
+    tray.setImage(newIcon);
+    tray.setToolTip(`System Pulse — CPU: ${health.cpuPercent}% | Mem: ${health.memPercent}%`);
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('health-update', health);
+    }
+  }, 5000);
+}
+
+// ─── IPC Handlers ───────────────────────────────────────────────────────────
+
+ipcMain.handle('get-system-info', () => getSystemInfo());
+ipcMain.handle('get-processes', () => getProcessList());
+ipcMain.handle('kill-process', (_, pid) => killProcess(pid));
+ipcMain.handle('kill-duplicates', (_, name) => killDuplicates(name));
+ipcMain.handle('get-network-usage', () => getNetworkUsage());
+ipcMain.handle('run-diagnostic', () => runDiagnostic());
+ipcMain.handle('get-platform', () => platform);
+
+// ─── App Lifecycle ──────────────────────────────────────────────────────────
+
+app.whenReady().then(() => {
+  createWindow();
+  createTray();
+});
+
+app.on('window-all-closed', () => {
+  // Keep running in tray
+});
+
+app.on('activate', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+  } else {
+    mainWindow.show();
+  }
+});
+
+app.on('before-quit', () => {
+  app.isQuitting = true;
+});

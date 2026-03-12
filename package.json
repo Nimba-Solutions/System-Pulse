@@ -1,0 +1,26 @@
+{
+  "name": "system-pulse",
+  "version": "1.0.0",
+  "description": "Real-time system diagnostics and health monitoring",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "author": "Cloud Nimbus LLC",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.cloudnimbus.system-pulse",
+    "productName": "System Pulse",
+    "win": { "target": "portable" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
+  }
+}
