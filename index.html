@@ -744,7 +744,11 @@
         </label>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
           <span style="font-size:12px;color:#888;">Server:</span>
-          <input type="text" id="remoteServerAddress" placeholder="192.168.1.172:9475" style="flex:1;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;" onchange="saveRemoteSettings()">
+          <input type="text" id="remoteServerAddress" placeholder="cloudnimbusllc.com" style="flex:1;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;" onchange="saveRemoteSettings()">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+          <span style="font-size:12px;color:#888;">API Key:</span>
+          <input type="text" id="remoteApiKey" placeholder="Auto-assigned on first connect" style="flex:1;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;font-family:monospace;" onchange="saveRemoteSettings()">
         </div>
         <div style="display:flex;gap:6px;align-items:center;">
           <span style="font-size:12px;color:#888;">Name:</span>
@@ -1333,6 +1337,7 @@ async function loadRemoteSettings() {
   document.getElementById('remoteServerPort').value = r.serverPort || 9475;
   document.getElementById('remoteClientEnabled').checked = r.clientEnabled;
   document.getElementById('remoteServerAddress').value = r.serverAddress || '';
+  document.getElementById('remoteApiKey').value = r.apiKey || '';
   document.getElementById('remoteMachineName').value = r.machineName || '';
 
   if (r.serverEnabled) {
@@ -1349,6 +1354,7 @@ async function saveRemoteSettings() {
     serverPort: parseInt(document.getElementById('remoteServerPort').value) || 9475,
     clientEnabled: document.getElementById('remoteClientEnabled').checked,
     serverAddress: document.getElementById('remoteServerAddress').value.trim(),
+    apiKey: document.getElementById('remoteApiKey').value.trim(),
     machineName: document.getElementById('remoteMachineName').value.trim() || undefined,
   };
   await window.api.saveRemoteSettings(settings);

@@ -16,8 +16,10 @@ const platform = process.platform; // 'win32', 'darwin', 'linux'
 const Store = require('electron-store');
 
 const http = require('http');
+const https = require('https');
 
-const DEFAULT_SERVER = '192.168.1.172:9475'; // Cloud Nimbus primary server
+const DEFAULT_SERVER = 'cloudnimbusllc.com';  // Cloud Nimbus hosted server
+const LAN_SERVER = '192.168.1.172:9475';      // Local LAN fallback
 
 const store = new Store({
   defaults: {
@@ -30,13 +32,15 @@ const store = new Store({
       serverPort: 9475,
       clientEnabled: true,
       serverAddress: DEFAULT_SERVER,
+      apiKey: '',  // assigned by cloud server or entered manually
       machineName: os.hostname(),
     },
   },
 });
 
-// Migrate existing installs: if remote was never configured, apply new defaults
-if (!store.get('remote.serverAddress') && store.get('remote.clientEnabled') === false) {
+// Migrate existing installs to cloud server
+const currentAddr = store.get('remote.serverAddress');
+if (!currentAddr || currentAddr === '192.168.1.172:9475') {
   store.set('remote.serverEnabled', true);
   store.set('remote.clientEnabled', true);
   store.set('remote.serverAddress', DEFAULT_SERVER);
@@ -955,8 +959,55 @@ function stopRemoteServer() {
   }
 }
 
+// Determine connection params: cloud (HTTPS + /api/pulse prefix) vs LAN (HTTP + direct)
+function getConnectionParams(serverAddress) {
+  const isCloud = serverAddress.includes('cloudnimbusllc.com') || serverAddress.includes('nimbus');
+  const apiKey = store.get('remote.apiKey') || '';
+
+  if (isCloud) {
+    // Cloud: HTTPS on port 443, paths prefixed with /api/pulse
+    const host = serverAddress.split(':')[0];
+    return {
+      transport: https,
+      hostname: host,
+      port: 443,
+      prefix: '/api/pulse',
+      headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {},
+    };
+  } else {
+    // LAN: HTTP on custom port, direct paths
+    const [host, port] = serverAddress.split(':');
+    return {
+      transport: http,
+      hostname: host,
+      port: parseInt(port) || 9475,
+      prefix: '',
+      headers: {},
+    };
+  }
+}
+
+function makeRequest(conn, method, path, payload, onResponse) {
+  const headers = {
+    ...conn.headers,
+    ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+  };
+  const req = conn.transport.request({
+    hostname: conn.hostname,
+    port: conn.port,
+    path: conn.prefix + path,
+    method,
+    headers,
+    timeout: 5000,
+  }, onResponse || ((res) => { res.resume(); }));
+  req.on('error', () => {});
+  if (payload) req.write(payload);
+  req.end();
+}
+
 async function pushSnapshotToServer(serverAddress) {
   try {
+    const conn = getConnectionParams(serverAddress);
     const sys = getSystemInfo();
     const procs = await getProcessList();
 
@@ -991,21 +1042,14 @@ async function pushSnapshotToServer(serverAddress) {
       uptime: sys.uptime,
     });
 
-    const [host, port] = serverAddress.split(':');
-    const req = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/snapshot', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-      timeout: 5000,
-    }, (res) => { res.resume(); });
-    req.on('error', () => {}); // Silently fail
-    req.write(payload);
-    req.end();
+    // Push snapshot
+    makeRequest(conn, 'POST', '/snapshot', payload);
 
     // Check for pending kill commands
     const myHostname = store.get('remote.machineName') || os.hostname();
-    const killReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/pending-kills', method: 'GET',
-      headers: { 'x-hostname': myHostname },
-      timeout: 5000,
-    }, (res) => {
+    const hostHeader = { 'x-hostname': myHostname };
+    const killConn = { ...conn, headers: { ...conn.headers, ...hostHeader } };
+    makeRequest(killConn, 'GET', '/pending-kills', null, (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
@@ -1017,23 +1061,17 @@ async function pushSnapshotToServer(serverAddress) {
         } catch (e) {}
       });
     });
-    killReq.on('error', () => {});
-    killReq.end();
 
     // Check for pending remote commands
-    const cmdReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/pending-commands', method: 'GET',
-      headers: { 'x-hostname': myHostname },
-      timeout: 5000,
-    }, (cmdRes) => {
+    const cmdConn = { ...conn, headers: { ...conn.headers, ...hostHeader } };
+    makeRequest(cmdConn, 'GET', '/pending-commands', null, (cmdRes) => {
       let cmdBody = '';
       cmdRes.on('data', chunk => { cmdBody += chunk; });
       cmdRes.on('end', () => {
         try {
           const cmds = JSON.parse(cmdBody);
           for (const cmd of cmds) {
-            // Execute the command locally
             exec(cmd.command, { timeout: 30000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
-              // Post result back to server
               const resultPayload = JSON.stringify({
                 hostname: myHostname,
                 cmdId: cmd.id,
@@ -1041,20 +1079,12 @@ async function pushSnapshotToServer(serverAddress) {
                 stderr: (stderr || '').slice(0, 100000),
                 exitCode: err ? err.code || 1 : 0,
               });
-              const resultReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/command-result', method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(resultPayload) },
-                timeout: 5000,
-              }, (r) => { r.resume(); });
-              resultReq.on('error', () => {});
-              resultReq.write(resultPayload);
-              resultReq.end();
+              makeRequest(conn, 'POST', '/command-result', resultPayload);
             });
           }
         } catch (e) {}
       });
     });
-    cmdReq.on('error', () => {});
-    cmdReq.end();
   } catch (e) { /* silent */ }
 }
 
