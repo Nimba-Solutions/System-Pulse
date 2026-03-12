@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('api', {
   getLogSummary: (filename) => ipcRenderer.invoke('get-log-summary', filename),
   getLogDir: () => ipcRenderer.invoke('get-log-dir'),
 
+  // Settings
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
+  setAutoStart: (v) => ipcRenderer.invoke('set-auto-start', v),
+
   // Events from main
   onTrayHealthUpdate: (cb) => ipcRenderer.on('health-update', (_, data) => cb(data)),
 });

@@ -18,6 +18,8 @@ const Store = require('electron-store');
 const store = new Store({
   defaults: {
     windowBounds: { width: 1100, height: 800 },
+    autoStart: false,
+    startMinimized: false,
   },
 });
 
@@ -758,6 +760,60 @@ ipcMain.handle('kill-duplicates', (_, name) => killDuplicates(name));
 ipcMain.handle('get-network-usage', () => getNetworkUsage());
 ipcMain.handle('run-diagnostic', () => runDiagnostic());
 ipcMain.handle('get-platform', () => platform);
+
+ipcMain.handle('set-auto-start', async (_, enabled) => {
+  const exePath = process.execPath;
+  const appPath = app.getAppPath();
+  const launchCmd = exePath.includes('electron') ? `"${exePath}" "${appPath}"` : `"${exePath}"`;
+
+  try {
+    if (platform === 'win32') {
+      const runCmd = require('child_process').execSync;
+      if (enabled) {
+        runCmd(`reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "SystemPulse" /t REG_SZ /d "${launchCmd}" /f`, { windowsHide: true });
+      } else {
+        runCmd(`reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "SystemPulse" /f`, { windowsHide: true });
+      }
+    } else if (platform === 'darwin') {
+      const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.cloudnimbus.system-pulse.plist');
+      if (enabled) {
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.cloudnimbus.system-pulse</string>
+<key>ProgramArguments</key><array><string>${exePath}</string><string>${appPath}</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>`;
+        fs.writeFileSync(plistPath, plist, 'utf8');
+      } else {
+        try { fs.unlinkSync(plistPath); } catch (e) {}
+      }
+    } else {
+      const desktopPath = path.join(os.homedir(), '.config', 'autostart', 'system-pulse.desktop');
+      if (enabled) {
+        const dir = path.dirname(desktopPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(desktopPath, `[Desktop Entry]\nType=Application\nName=System Pulse\nExec=${launchCmd}\nHidden=false\n`, 'utf8');
+      } else {
+        try { fs.unlinkSync(desktopPath); } catch (e) {}
+      }
+    }
+    store.set('autoStart', enabled);
+    return { status: 'ok' };
+  } catch (e) {
+    return { status: 'error', message: e.message };
+  }
+});
+
+ipcMain.handle('get-settings', () => ({
+  autoStart: store.get('autoStart'),
+  startMinimized: store.get('startMinimized'),
+}));
+
+ipcMain.handle('save-settings', (_, s) => {
+  if (s.startMinimized !== undefined) store.set('startMinimized', s.startMinimized);
+  return { status: 'ok' };
+});
 ipcMain.handle('get-log-files', () => getLogFiles());
 ipcMain.handle('get-log-entries', (_, filename) => readLogFile(filename));
 ipcMain.handle('get-log-summary', (_, filename) => getLogSummary(filename));
@@ -766,9 +822,12 @@ ipcMain.handle('get-log-dir', () => logDir);
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  createWindow();
   createTray();
   startLogging(); // Background diagnostics every 30s
+
+  if (!store.get('startMinimized')) {
+    createWindow();
+  }
 });
 
 app.on('window-all-closed', () => {
