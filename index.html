@@ -530,6 +530,7 @@
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
   <button class="tab-btn" data-tab="processes">Processes</button>
   <button class="tab-btn" data-tab="diagnostics">Diagnostics</button>
+  <button class="tab-btn" data-tab="logs">History</button>
 </div>
 
 <!-- Dashboard Tab -->
@@ -648,6 +649,68 @@
         </div>
       </li>
     </ul>
+  </div>
+</div>
+
+<!-- History/Logs Tab -->
+<div class="tab-content" id="tab-logs">
+  <div class="card">
+    <div class="card-header">
+      <h3>Diagnostic History</h3>
+      <span style="font-size:11px;color:#666;" id="logDirPath"></span>
+    </div>
+    <p style="font-size:12px;color:#888;margin-bottom:12px;">System snapshots are recorded every 30 seconds in the background. Select a day to see what happened.</p>
+
+    <div style="display:flex;gap:12px;">
+      <div style="min-width:160px;">
+        <h4 style="font-size:12px;color:#888;margin-bottom:8px;">Log Files</h4>
+        <div id="logFileList" style="display:flex;flex-direction:column;gap:4px;"></div>
+      </div>
+
+      <div style="flex:1;">
+        <div id="logSummaryPanel" style="display:none;">
+          <h4 style="font-size:14px;color:#f59e0b;margin-bottom:10px;" id="logSummaryDate"></h4>
+
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
+            <div class="stat-card" style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:#888;">Avg CPU</div>
+              <div style="font-size:22px;font-weight:700;color:#f59e0b;" id="logAvgCpu">--</div>
+            </div>
+            <div class="stat-card" style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:#888;">Peak CPU</div>
+              <div style="font-size:22px;font-weight:700;color:#ef4444;" id="logPeakCpu">--</div>
+            </div>
+            <div class="stat-card" style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:#888;">Avg Memory</div>
+              <div style="font-size:22px;font-weight:700;color:#3b82f6;" id="logAvgMem">--</div>
+            </div>
+            <div class="stat-card" style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:#888;">Events</div>
+              <div style="font-size:22px;font-weight:700;color:#eab308;" id="logEventCount">--</div>
+            </div>
+          </div>
+
+          <div style="margin-bottom:16px;">
+            <h4 style="font-size:12px;color:#888;margin-bottom:6px;">Frequent CPU Hogs (>20% CPU)</h4>
+            <div id="logHogList" style="font-size:12px;"></div>
+          </div>
+
+          <div style="margin-bottom:16px;">
+            <h4 style="font-size:12px;color:#888;margin-bottom:6px;">Event Breakdown</h4>
+            <div id="logEventBreakdown" style="font-size:12px;"></div>
+          </div>
+
+          <div>
+            <h4 style="font-size:12px;color:#888;margin-bottom:6px;">CPU Timeline</h4>
+            <canvas id="logCpuCanvas" width="700" height="120" style="width:100%;background:#0e0b1a;border:1px solid #2a2450;border-radius:6px;"></canvas>
+          </div>
+        </div>
+
+        <div id="logEmptyState" style="color:#666;font-size:13px;padding:20px;">
+          Select a log file to view the day's summary.
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1062,6 +1125,153 @@ window.api.onTrayHealthUpdate((health) => {
   const labels = { ok: 'HEALTHY', warning: 'WARNING', critical: 'CRITICAL' };
   badge.textContent = labels[health.level] || 'HEALTHY';
 });
+
+// ─── History/Logs ───────────────────────────────────────────────────────────
+
+async function loadLogFiles() {
+  const files = await window.api.getLogFiles();
+  const list = document.getElementById('logFileList');
+  const dir = await window.api.getLogDir();
+  document.getElementById('logDirPath').textContent = dir;
+
+  if (files.length === 0) {
+    list.innerHTML = '<div style="color:#666;font-size:12px;">No logs yet. Data is recorded every 30 seconds.</div>';
+    return;
+  }
+
+  list.innerHTML = files.map(f => {
+    const date = f.replace('pulse-', '').replace('.jsonl', '');
+    const isToday = date === new Date().toISOString().split('T')[0];
+    return `<button onclick="loadLogSummary('${esc(f)}')" style="text-align:left;padding:8px 10px;border:1px solid #2a2450;border-radius:6px;background:#1a1730;color:#dde;cursor:pointer;font-size:12px;transition:all 0.15s;" onmouseover="this.style.borderColor='#f59e0b'" onmouseout="this.style.borderColor='#2a2450'">
+      ${date}${isToday ? ' <span style="color:#f59e0b;font-size:10px;">(today)</span>' : ''}
+    </button>`;
+  }).join('');
+}
+
+async function loadLogSummary(filename) {
+  const summary = await window.api.getLogSummary(filename);
+  if (!summary) {
+    showToast('No data in this log file');
+    return;
+  }
+
+  document.getElementById('logEmptyState').style.display = 'none';
+  document.getElementById('logSummaryPanel').style.display = 'block';
+
+  document.getElementById('logSummaryDate').textContent = summary.date + ` (${summary.snapshots} snapshots over ${summary.duration}m)`;
+  document.getElementById('logAvgCpu').textContent = summary.cpu.avg + '%';
+  document.getElementById('logPeakCpu').textContent = summary.cpu.max + '%';
+  document.getElementById('logAvgMem').textContent = summary.memory.avg + '%';
+  document.getElementById('logEventCount').textContent = summary.totalEvents;
+
+  // Frequent hogs
+  const hogList = document.getElementById('logHogList');
+  if (summary.frequentHogs.length === 0) {
+    hogList.innerHTML = '<div style="color:#666;">No sustained CPU hogs detected.</div>';
+  } else {
+    hogList.innerHTML = summary.frequentHogs.map(h =>
+      `<div style="display:flex;justify-content:space-between;padding:4px 8px;background:#1a1730;border-radius:4px;margin-bottom:3px;">
+        <span style="color:#dde;font-weight:600;">${esc(h.name)}</span>
+        <span style="color:#f59e0b;">in ${h.pctOfSnapshots}% of snapshots (${h.appearances}x)</span>
+      </div>`
+    ).join('');
+  }
+
+  // Event breakdown
+  const eventDiv = document.getElementById('logEventBreakdown');
+  const eventLabels = {
+    'high-cpu': 'High CPU (>75%)',
+    'high-memory': 'High Memory (>90%)',
+    'duplicates': 'Duplicate Processes',
+    'cpu-hog': 'Single Process >50% CPU',
+  };
+  if (Object.keys(summary.eventCounts).length === 0) {
+    eventDiv.innerHTML = '<div style="color:#4ade80;">No anomalies recorded.</div>';
+  } else {
+    eventDiv.innerHTML = Object.entries(summary.eventCounts).map(([type, count]) => {
+      const color = type === 'high-cpu' || type === 'cpu-hog' ? '#ef4444' : type === 'duplicates' ? '#eab308' : '#3b82f6';
+      return `<div style="display:flex;justify-content:space-between;padding:4px 8px;background:#1a1730;border-radius:4px;margin-bottom:3px;">
+        <span style="color:${color};">${eventLabels[type] || type}</span>
+        <span style="color:#888;">${count} occurrences</span>
+      </div>`;
+    }).join('');
+  }
+
+  // Draw CPU timeline from actual log entries
+  const entries = await window.api.getLogEntries(filename);
+  drawLogCpuGraph(entries);
+}
+
+function drawLogCpuGraph(entries) {
+  const canvas = document.getElementById('logCpuCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width;
+  const h = rect.height;
+  const pad = 4;
+
+  ctx.clearRect(0, 0, w, h);
+  if (entries.length < 2) return;
+
+  const cpuVals = entries.map(e => e.cpu);
+
+  // Grid
+  ctx.strokeStyle = '#2a245522';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + (i / 4) * (h - 2 * pad);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < cpuVals.length; i++) {
+    const x = (i / (cpuVals.length - 1)) * w;
+    const y = pad + (1 - cpuVals[i] / 100) * (h - 2 * pad);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, '#f59e0b33');
+  grad.addColorStop(1, '#f59e0b00');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Time labels
+  ctx.fillStyle = '#666';
+  ctx.font = '9px sans-serif';
+  if (entries.length > 0) {
+    const first = new Date(entries[0].ts);
+    const last = new Date(entries[entries.length - 1].ts);
+    ctx.fillText(first.toLocaleTimeString(), 2, h - 2);
+    ctx.fillText(last.toLocaleTimeString(), w - 50, h - 2);
+  }
+}
+
+// Load log files when History tab is opened
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.tab === 'logs') loadLogFiles();
+  });
+});
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // ─── Start Polling ──────────────────────────────────────────────────────────
 pollSystemInfo();

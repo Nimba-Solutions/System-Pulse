@@ -598,6 +598,157 @@ function createTray() {
   }, 5000);
 }
 
+// ─── Background Logger ─────────────────────────────────────────────────────
+
+const logDir = path.join(app.getPath('userData'), 'logs');
+let logInterval = null;
+
+function ensureLogDir() {
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+}
+
+function getLogFilePath() {
+  const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  return path.join(logDir, `pulse-${date}.jsonl`);
+}
+
+async function logSnapshot() {
+  try {
+    ensureLogDir();
+    const sys = getSystemInfo();
+    const procs = await getProcessList();
+    const net = await getNetworkUsage();
+
+    // Top 10 CPU hogs
+    const topCpu = procs
+      .sort((a, b) => b.cpu - a.cpu)
+      .slice(0, 10)
+      .map(p => ({ name: p.name, pid: p.pid, cpu: p.cpu, memMb: p.memMb }));
+
+    // Top 5 memory hogs
+    const topMem = procs
+      .sort((a, b) => b.memMb - a.memMb)
+      .slice(0, 5)
+      .map(p => ({ name: p.name, pid: p.pid, memMb: p.memMb }));
+
+    // Duplicate process check
+    const nameCounts = {};
+    for (const p of procs) {
+      nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
+    }
+    const duplicates = Object.entries(nameCounts)
+      .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'Code.exe'].includes(name))
+      .map(([name, count]) => ({ name, count }));
+
+    // Events/anomalies
+    const events = [];
+    if (sys.cpuPercent > 75) events.push({ type: 'high-cpu', value: sys.cpuPercent });
+    if ((sys.usedMem / sys.totalMem) > 0.9) events.push({ type: 'high-memory', pct: Math.round((sys.usedMem / sys.totalMem) * 100) });
+    if (duplicates.length > 0) events.push({ type: 'duplicates', items: duplicates });
+    for (const p of topCpu) {
+      if (p.cpu > 50) events.push({ type: 'cpu-hog', name: p.name, pid: p.pid, cpu: p.cpu });
+    }
+
+    const entry = {
+      ts: new Date().toISOString(),
+      cpu: sys.cpuPercent,
+      memUsedMb: Math.round(sys.usedMem / 1048576),
+      memTotalMb: Math.round(sys.totalMem / 1048576),
+      memPct: Math.round((sys.usedMem / sys.totalMem) * 100),
+      netUp: net?.uploadMbps || 0,
+      netDown: net?.downloadMbps || 0,
+      topCpu,
+      topMem,
+      duplicates,
+      events,
+    };
+
+    fs.appendFileSync(getLogFilePath(), JSON.stringify(entry) + '\n', 'utf8');
+  } catch (e) {
+    // Don't crash the app if logging fails
+  }
+}
+
+function startLogging() {
+  if (logInterval) return;
+  // Log every 30 seconds
+  logSnapshot(); // initial snapshot
+  logInterval = setInterval(logSnapshot, 30000);
+}
+
+function stopLogging() {
+  if (logInterval) {
+    clearInterval(logInterval);
+    logInterval = null;
+  }
+}
+
+function getLogFiles() {
+  ensureLogDir();
+  try {
+    return fs.readdirSync(logDir)
+      .filter(f => f.startsWith('pulse-') && f.endsWith('.jsonl'))
+      .sort()
+      .reverse();
+  } catch (e) { return []; }
+}
+
+function readLogFile(filename) {
+  const filePath = path.join(logDir, filename);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
+    return lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+  } catch (e) { return []; }
+}
+
+function getLogSummary(filename) {
+  const entries = readLogFile(filename);
+  if (entries.length === 0) return null;
+
+  const cpuValues = entries.map(e => e.cpu);
+  const memValues = entries.map(e => e.memPct);
+  const allEvents = entries.flatMap(e => e.events || []);
+
+  // Count event types
+  const eventCounts = {};
+  for (const ev of allEvents) {
+    eventCounts[ev.type] = (eventCounts[ev.type] || 0) + 1;
+  }
+
+  // Find worst CPU hogs across the day
+  const hogCounts = {};
+  for (const entry of entries) {
+    for (const p of (entry.topCpu || []).filter(p => p.cpu > 20)) {
+      hogCounts[p.name] = (hogCounts[p.name] || 0) + 1;
+    }
+  }
+  const frequentHogs = Object.entries(hogCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([name, count]) => ({ name, appearances: count, pctOfSnapshots: Math.round((count / entries.length) * 100) }));
+
+  return {
+    date: filename.replace('pulse-', '').replace('.jsonl', ''),
+    snapshots: entries.length,
+    duration: entries.length > 1
+      ? Math.round((new Date(entries[entries.length - 1].ts) - new Date(entries[0].ts)) / 60000)
+      : 0,
+    cpu: {
+      avg: Math.round(cpuValues.reduce((a, b) => a + b, 0) / cpuValues.length),
+      max: Math.max(...cpuValues),
+      min: Math.min(...cpuValues),
+    },
+    memory: {
+      avg: Math.round(memValues.reduce((a, b) => a + b, 0) / memValues.length),
+      max: Math.max(...memValues),
+    },
+    eventCounts,
+    frequentHogs,
+    totalEvents: allEvents.length,
+  };
+}
+
 // ─── IPC Handlers ───────────────────────────────────────────────────────────
 
 ipcMain.handle('get-system-info', () => getSystemInfo());
@@ -607,12 +758,17 @@ ipcMain.handle('kill-duplicates', (_, name) => killDuplicates(name));
 ipcMain.handle('get-network-usage', () => getNetworkUsage());
 ipcMain.handle('run-diagnostic', () => runDiagnostic());
 ipcMain.handle('get-platform', () => platform);
+ipcMain.handle('get-log-files', () => getLogFiles());
+ipcMain.handle('get-log-entries', (_, filename) => readLogFile(filename));
+ipcMain.handle('get-log-summary', (_, filename) => getLogSummary(filename));
+ipcMain.handle('get-log-dir', () => logDir);
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
   createWindow();
   createTray();
+  startLogging(); // Background diagnostics every 30s
 });
 
 app.on('window-all-closed', () => {

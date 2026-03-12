@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld('api', {
   // Platform
   getPlatform: () => ipcRenderer.invoke('get-platform'),
 
+  // Logs
+  getLogFiles: () => ipcRenderer.invoke('get-log-files'),
+  getLogEntries: (filename) => ipcRenderer.invoke('get-log-entries', filename),
+  getLogSummary: (filename) => ipcRenderer.invoke('get-log-summary', filename),
+  getLogDir: () => ipcRenderer.invoke('get-log-dir'),
+
   // Events from main
   onTrayHealthUpdate: (cb) => ipcRenderer.on('health-update', (_, data) => cb(data)),
 });
