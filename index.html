@@ -531,6 +531,7 @@
   <button class="tab-btn" data-tab="processes">Processes</button>
   <button class="tab-btn" data-tab="diagnostics">Diagnostics</button>
   <button class="tab-btn" data-tab="logs">History</button>
+  <button class="tab-btn" data-tab="remote">Remote</button>
 </div>
 
 <!-- Dashboard Tab -->
@@ -710,6 +711,54 @@
           Select a log file to view the day's summary.
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Remote Monitoring Tab -->
+<div class="tab-content" id="tab-remote">
+  <div class="card" style="margin-bottom:12px;">
+    <div class="card-header"><h3>Remote Monitoring Setup</h3></div>
+    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+      Run as <b>Server</b> on your main PC to receive data. Run as <b>Client</b> on remote machines to send data.
+    </p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:14px;">
+        <h4 style="color:#f59e0b;margin-bottom:8px;">Server Mode</h4>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">
+          <input type="checkbox" id="remoteServerEnabled" onchange="saveRemoteSettings()"> Enable server (receive data)
+        </label>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:12px;color:#888;">Port:</span>
+          <input type="number" id="remoteServerPort" value="9475" style="width:80px;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;" onchange="saveRemoteSettings()">
+        </div>
+        <div id="serverStatus" style="font-size:11px;color:#666;margin-top:8px;"></div>
+      </div>
+      <div style="background:#1a1730;border:1px solid #2a2450;border-radius:8px;padding:14px;">
+        <h4 style="color:#3b82f6;margin-bottom:8px;">Client Mode</h4>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:8px;">
+          <input type="checkbox" id="remoteClientEnabled" onchange="saveRemoteSettings()"> Enable client (send data)
+        </label>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+          <span style="font-size:12px;color:#888;">Server:</span>
+          <input type="text" id="remoteServerAddress" placeholder="192.168.1.100:9475" style="flex:1;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;" onchange="saveRemoteSettings()">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:12px;color:#888;">Name:</span>
+          <input type="text" id="remoteMachineName" placeholder="My Laptop" style="flex:1;padding:4px 8px;background:#0e0b1a;border:1px solid #333;border-radius:4px;color:#dde;font-size:12px;" onchange="saveRemoteSettings()">
+        </div>
+        <div id="clientStatus" style="font-size:11px;color:#666;margin-top:8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3>Connected Machines</h3>
+      <button onclick="refreshRemoteClients()" style="padding:4px 12px;border:1px solid #f59e0b;background:none;color:#f59e0b;border-radius:4px;cursor:pointer;font-size:11px;">Refresh</button>
+    </div>
+    <div id="remoteClientsList" style="margin-top:8px;">
+      <div style="color:#666;font-size:13px;">No remote machines connected. Enable server mode and connect a client.</div>
     </div>
   </div>
 </div>
@@ -1272,6 +1321,153 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ─── Remote Monitoring ─────────────────────────────────────────────────────
+
+async function loadRemoteSettings() {
+  const r = await window.api.getRemoteSettings();
+  document.getElementById('remoteServerEnabled').checked = r.serverEnabled;
+  document.getElementById('remoteServerPort').value = r.serverPort || 9475;
+  document.getElementById('remoteClientEnabled').checked = r.clientEnabled;
+  document.getElementById('remoteServerAddress').value = r.serverAddress || '';
+  document.getElementById('remoteMachineName').value = r.machineName || '';
+
+  if (r.serverEnabled) {
+    document.getElementById('serverStatus').innerHTML = '<span style="color:#4ade80;">Listening on port ' + (r.serverPort || 9475) + '</span>';
+  }
+  if (r.clientEnabled && r.serverAddress) {
+    document.getElementById('clientStatus').innerHTML = '<span style="color:#4ade80;">Sending to ' + esc(r.serverAddress) + '</span>';
+  }
+}
+
+async function saveRemoteSettings() {
+  const settings = {
+    serverEnabled: document.getElementById('remoteServerEnabled').checked,
+    serverPort: parseInt(document.getElementById('remoteServerPort').value) || 9475,
+    clientEnabled: document.getElementById('remoteClientEnabled').checked,
+    serverAddress: document.getElementById('remoteServerAddress').value.trim(),
+    machineName: document.getElementById('remoteMachineName').value.trim() || undefined,
+  };
+  await window.api.saveRemoteSettings(settings);
+
+  document.getElementById('serverStatus').innerHTML = settings.serverEnabled
+    ? '<span style="color:#4ade80;">Listening on port ' + settings.serverPort + '</span>'
+    : '';
+  document.getElementById('clientStatus').innerHTML = settings.clientEnabled && settings.serverAddress
+    ? '<span style="color:#4ade80;">Sending to ' + esc(settings.serverAddress) + '</span>'
+    : '';
+
+  showToast('Remote settings saved');
+}
+
+async function refreshRemoteClients() {
+  const clients = await window.api.getRemoteClients();
+  const list = document.getElementById('remoteClientsList');
+  const entries = Object.entries(clients);
+
+  if (entries.length === 0) {
+    list.innerHTML = '<div style="color:#666;font-size:13px;">No remote machines connected.</div>';
+    return;
+  }
+
+  list.innerHTML = entries.map(([hostname, data]) => {
+    const age = Math.round((Date.now() - data.lastSeen) / 1000);
+    const stale = age > 60;
+    const cpuColor = data.cpu > 75 ? '#ef4444' : data.cpu > 50 ? '#eab308' : '#4ade80';
+    const memColor = data.memPct > 90 ? '#ef4444' : data.memPct > 70 ? '#eab308' : '#4ade80';
+
+    const topProcs = (data.topCpu || []).slice(0, 5).map(p =>
+      `<div style="display:flex;justify-content:space-between;padding:2px 6px;font-size:11px;">
+        <span style="color:#dde;">${esc(p.name)}</span>
+        <span style="display:flex;gap:12px;">
+          <span style="color:${p.cpu > 30 ? '#ef4444' : '#888'};">${p.cpu}% CPU</span>
+          <span style="color:#888;">${p.memMb}MB</span>
+          <button onclick="remoteKillProcess('${esc(hostname)}', ${p.pid}, '${esc(p.name)}')" style="border:1px solid #ef4444;background:none;color:#ef4444;padding:1px 6px;border-radius:3px;cursor:pointer;font-size:10px;">Kill</button>
+        </span>
+      </div>`
+    ).join('');
+
+    const dupes = (data.duplicates || []).map(d =>
+      `<span style="background:#713f12;color:#facc15;padding:2px 6px;border-radius:4px;font-size:10px;margin-right:4px;">${esc(d.name)} x${d.count}</span>`
+    ).join('');
+
+    return `<div style="background:#1a1730;border:1px solid ${stale ? '#333' : '#2a2450'};border-radius:8px;padding:12px;margin-bottom:8px;${stale ? 'opacity:0.5;' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div>
+          <span style="font-size:15px;font-weight:700;color:#dde;">${esc(hostname)}</span>
+          ${stale ? '<span style="color:#ef4444;font-size:11px;margin-left:8px;">STALE (${age}s ago)</span>' : '<span style="color:#4ade80;font-size:11px;margin-left:8px;">LIVE</span>'}
+        </div>
+        <div style="display:flex;gap:16px;">
+          <div style="text-align:center;">
+            <div style="font-size:10px;color:#888;">CPU</div>
+            <div style="font-size:20px;font-weight:700;color:${cpuColor};">${data.cpu}%</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-size:10px;color:#888;">Memory</div>
+            <div style="font-size:20px;font-weight:700;color:${memColor};">${data.memPct}%</div>
+          </div>
+        </div>
+      </div>
+      ${dupes ? '<div style="margin-bottom:6px;">' + dupes + '</div>' : ''}
+      <div style="background:#0e0b1a;border-radius:6px;padding:4px 0;">${topProcs || '<div style="color:#666;font-size:11px;padding:4px 6px;">No process data</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+async function remoteKillProcess(hostname, pid, name) {
+  if (!confirm('Kill ' + name + ' (PID ' + pid + ') on ' + hostname + '?')) return;
+  const result = await window.api.remoteKill(hostname, pid, name);
+  showToast(result.status === 'queued' ? 'Kill command sent to ' + hostname : result.message || 'Done');
+  setTimeout(refreshRemoteClients, 2000);
+}
+
+// Listen for real-time remote alerts
+window.api.onRemoteAlert((data) => {
+  const msg = [];
+  if (data.cpu > 75) msg.push('CPU at ' + data.cpu + '%');
+  if (data.memPct > 90) msg.push('Memory at ' + data.memPct + '%');
+
+  // Show a toast
+  showToast('[' + data.hostname + '] ' + msg.join(', '));
+
+  // Audio alert
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = 440;
+    gain.gain.value = 0.3;
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.8);
+    osc.stop(audioCtx.currentTime + 0.8);
+  } catch (e) {}
+
+  refreshRemoteClients();
+});
+
+// Listen for snapshots to auto-refresh
+window.api.onRemoteSnapshot(() => {
+  // Debounce - only refresh every 5 seconds max
+  if (!window._remoteRefreshPending) {
+    window._remoteRefreshPending = true;
+    setTimeout(() => {
+      refreshRemoteClients();
+      window._remoteRefreshPending = false;
+    }, 5000);
+  }
+});
+
+// Load remote settings when tab is opened
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.tab === 'remote') {
+      loadRemoteSettings();
+      refreshRemoteClients();
+    }
+  });
+});
 
 // ─── Start Polling ──────────────────────────────────────────────────────────
 pollSystemInfo();

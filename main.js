@@ -15,11 +15,20 @@ const platform = process.platform; // 'win32', 'darwin', 'linux'
 
 const Store = require('electron-store');
 
+const http = require('http');
+
 const store = new Store({
   defaults: {
     windowBounds: { width: 1100, height: 800 },
     autoStart: false,
     startMinimized: false,
+    remote: {
+      serverEnabled: false,
+      serverPort: 9475,
+      clientEnabled: false,
+      serverAddress: '',   // e.g. '192.168.1.100:9475'
+      machineName: os.hostname(),
+    },
   },
 });
 
@@ -751,6 +760,204 @@ function getLogSummary(filename) {
   };
 }
 
+// ─── Remote Monitoring ─────────────────────────────────────────────────────
+
+let remoteServer = null;
+const remoteClients = new Map(); // hostname -> { lastSnapshot, lastSeen }
+let clientPushInterval = null;
+
+function startRemoteServer(port) {
+  if (remoteServer) return;
+  remoteServer = http.createServer((req, res) => {
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+    if (req.method === 'POST' && req.url === '/snapshot') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; if (body.length > 1048576) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const hostname = data.hostname || 'unknown';
+          remoteClients.set(hostname, {
+            lastSnapshot: data,
+            lastSeen: Date.now(),
+          });
+          // Forward to renderer
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('remote-snapshot', { hostname, data });
+          }
+          // Check for alerts
+          if (data.cpu > 75 || data.memPct > 90) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('remote-alert', {
+                hostname,
+                cpu: data.cpu,
+                memPct: data.memPct,
+                events: data.events || [],
+              });
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+        } catch (e) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'bad json' }));
+        }
+      });
+    } else if (req.method === 'POST' && req.url === '/kill') {
+      // Remote kill command — client polls this
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+    } else if (req.method === 'GET' && req.url === '/clients') {
+      const clients = {};
+      remoteClients.forEach((val, key) => {
+        clients[key] = { ...val.lastSnapshot, lastSeen: val.lastSeen };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(clients));
+    } else if (req.method === 'GET' && req.url === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', hostname: os.hostname() }));
+    } else if (req.method === 'POST' && req.url.startsWith('/remote-kill/')) {
+      // Server sends kill command to be picked up by client
+      const targetHost = decodeURIComponent(req.url.split('/remote-kill/')[1]);
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { pid, name } = JSON.parse(body);
+          const client = remoteClients.get(targetHost);
+          if (client) {
+            if (!client.pendingKills) client.pendingKills = [];
+            client.pendingKills.push({ pid: parseInt(pid), name, ts: Date.now() });
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'queued' }));
+        } catch (e) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'bad request' }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/pending-kills') {
+      // Client polls for kill commands
+      const hostname = req.headers['x-hostname'] || '';
+      const client = remoteClients.get(hostname);
+      const kills = (client && client.pendingKills) || [];
+      if (client) client.pendingKills = [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(kills));
+    } else {
+      res.writeHead(404);
+      res.end('not found');
+    }
+  });
+
+  remoteServer.listen(port, '0.0.0.0', () => {
+    console.log(`System Pulse server listening on port ${port}`);
+  });
+  remoteServer.on('error', (e) => {
+    console.error('Server error:', e.message);
+    remoteServer = null;
+  });
+}
+
+function stopRemoteServer() {
+  if (remoteServer) {
+    remoteServer.close();
+    remoteServer = null;
+  }
+}
+
+async function pushSnapshotToServer(serverAddress) {
+  try {
+    const sys = getSystemInfo();
+    const procs = await getProcessList();
+
+    const topCpu = procs.sort((a, b) => b.cpu - a.cpu).slice(0, 10)
+      .map(p => ({ name: p.name, pid: p.pid, cpu: p.cpu, memMb: p.memMb }));
+    const topMem = procs.sort((a, b) => b.memMb - a.memMb).slice(0, 5)
+      .map(p => ({ name: p.name, pid: p.pid, memMb: p.memMb }));
+
+    // Duplicates
+    const nameCounts = {};
+    for (const p of procs) nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
+    const duplicates = Object.entries(nameCounts)
+      .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe'].includes(name))
+      .map(([name, count]) => ({ name, count }));
+
+    const events = [];
+    if (sys.cpuPercent > 75) events.push({ type: 'high-cpu', value: sys.cpuPercent });
+    if ((sys.usedMem / sys.totalMem) > 0.9) events.push({ type: 'high-memory', pct: Math.round((sys.usedMem / sys.totalMem) * 100) });
+    if (duplicates.length > 0) events.push({ type: 'duplicates', items: duplicates });
+
+    const payload = JSON.stringify({
+      hostname: store.get('remote.machineName') || os.hostname(),
+      ts: new Date().toISOString(),
+      cpu: sys.cpuPercent,
+      memUsedMb: Math.round(sys.usedMem / 1048576),
+      memTotalMb: Math.round(sys.totalMem / 1048576),
+      memPct: Math.round((sys.usedMem / sys.totalMem) * 100),
+      topCpu,
+      topMem,
+      duplicates,
+      events,
+      uptime: sys.uptime,
+    });
+
+    const [host, port] = serverAddress.split(':');
+    const req = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/snapshot', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: 5000,
+    }, (res) => { res.resume(); });
+    req.on('error', () => {}); // Silently fail
+    req.write(payload);
+    req.end();
+
+    // Also check for pending kill commands
+    const killReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/pending-kills', method: 'GET',
+      headers: { 'x-hostname': store.get('remote.machineName') || os.hostname() },
+      timeout: 5000,
+    }, (res) => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const kills = JSON.parse(body);
+          for (const k of kills) {
+            if (k.pid) killProcess(k.pid);
+          }
+        } catch (e) {}
+      });
+    });
+    killReq.on('error', () => {});
+    killReq.end();
+  } catch (e) { /* silent */ }
+}
+
+function startClientPush() {
+  const remote = store.get('remote');
+  if (!remote.clientEnabled || !remote.serverAddress) return;
+  if (clientPushInterval) clearInterval(clientPushInterval);
+
+  pushSnapshotToServer(remote.serverAddress);
+  clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), 15000);
+}
+
+function stopClientPush() {
+  if (clientPushInterval) {
+    clearInterval(clientPushInterval);
+    clientPushInterval = null;
+  }
+}
+
 // ─── IPC Handlers ───────────────────────────────────────────────────────────
 
 ipcMain.handle('get-system-info', () => getSystemInfo());
@@ -814,6 +1021,52 @@ ipcMain.handle('save-settings', (_, s) => {
   if (s.startMinimized !== undefined) store.set('startMinimized', s.startMinimized);
   return { status: 'ok' };
 });
+ipcMain.handle('get-remote-settings', () => store.get('remote'));
+ipcMain.handle('save-remote-settings', (_, settings) => {
+  const prev = store.get('remote');
+  store.set('remote', { ...prev, ...settings });
+  const updated = store.get('remote');
+
+  // Start/stop server
+  if (updated.serverEnabled && !remoteServer) {
+    startRemoteServer(updated.serverPort || 9475);
+  } else if (!updated.serverEnabled && remoteServer) {
+    stopRemoteServer();
+  }
+
+  // Start/stop client
+  if (updated.clientEnabled && updated.serverAddress) {
+    startClientPush();
+  } else {
+    stopClientPush();
+  }
+
+  return { status: 'ok' };
+});
+
+ipcMain.handle('get-remote-clients', () => {
+  const clients = {};
+  remoteClients.forEach((val, key) => {
+    clients[key] = { ...val.lastSnapshot, lastSeen: val.lastSeen };
+  });
+  return clients;
+});
+
+ipcMain.handle('remote-kill', async (_, { hostname, pid, name }) => {
+  // If it's a local kill
+  if (hostname === os.hostname() || hostname === store.get('remote.machineName')) {
+    return killProcess(pid);
+  }
+  // Queue kill for remote client
+  const client = remoteClients.get(hostname);
+  if (client) {
+    if (!client.pendingKills) client.pendingKills = [];
+    client.pendingKills.push({ pid: parseInt(pid), name, ts: Date.now() });
+    return { status: 'queued', message: `Kill queued for ${hostname}` };
+  }
+  return { status: 'error', message: 'Client not connected' };
+});
+
 ipcMain.handle('get-log-files', () => getLogFiles());
 ipcMain.handle('get-log-entries', (_, filename) => readLogFile(filename));
 ipcMain.handle('get-log-summary', (_, filename) => getLogSummary(filename));
@@ -824,6 +1077,11 @@ ipcMain.handle('get-log-dir', () => logDir);
 app.whenReady().then(() => {
   createTray();
   startLogging(); // Background diagnostics every 30s
+
+  // Start remote monitoring if configured
+  const remote = store.get('remote');
+  if (remote.serverEnabled) startRemoteServer(remote.serverPort || 9475);
+  if (remote.clientEnabled && remote.serverAddress) startClientPush();
 
   if (!store.get('startMinimized')) {
     createWindow();

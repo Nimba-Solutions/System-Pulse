@@ -35,6 +35,14 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   setAutoStart: (v) => ipcRenderer.invoke('set-auto-start', v),
 
+  // Remote monitoring
+  getRemoteSettings: () => ipcRenderer.invoke('get-remote-settings'),
+  saveRemoteSettings: (s) => ipcRenderer.invoke('save-remote-settings', s),
+  getRemoteClients: () => ipcRenderer.invoke('get-remote-clients'),
+  remoteKill: (hostname, pid, name) => ipcRenderer.invoke('remote-kill', { hostname, pid, name }),
+  onRemoteSnapshot: (cb) => ipcRenderer.on('remote-snapshot', (_, data) => cb(data)),
+  onRemoteAlert: (cb) => ipcRenderer.on('remote-alert', (_, data) => cb(data)),
+
   // Events from main
   onTrayHealthUpdate: (cb) => ipcRenderer.on('health-update', (_, data) => cb(data)),
 });
