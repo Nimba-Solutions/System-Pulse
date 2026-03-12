@@ -23,7 +23,7 @@ const store = new Store({
   defaults: {
     windowBounds: { width: 1100, height: 800 },
     autoStart: true,
-    startMinimized: false,
+    startMinimized: true,
     firstRun: true,
     remote: {
       serverEnabled: true,
@@ -43,6 +43,7 @@ if (!store.get('remote.serverAddress') && store.get('remote.clientEnabled') === 
 }
 if (store.get('autoStart') === false && store.get('firstRun') === undefined) {
   store.set('autoStart', true);
+  store.set('startMinimized', true);
   store.set('firstRun', true); // trigger auto-start registration
 }
 
