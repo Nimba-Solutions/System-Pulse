@@ -17,20 +17,34 @@ const Store = require('electron-store');
 
 const http = require('http');
 
+const DEFAULT_SERVER = '192.168.1.172:9475'; // Cloud Nimbus primary server
+
 const store = new Store({
   defaults: {
     windowBounds: { width: 1100, height: 800 },
-    autoStart: false,
+    autoStart: true,
     startMinimized: false,
+    firstRun: true,
     remote: {
-      serverEnabled: false,
+      serverEnabled: true,
       serverPort: 9475,
-      clientEnabled: false,
-      serverAddress: '',   // e.g. '192.168.1.100:9475'
+      clientEnabled: true,
+      serverAddress: DEFAULT_SERVER,
       machineName: os.hostname(),
     },
   },
 });
+
+// Migrate existing installs: if remote was never configured, apply new defaults
+if (!store.get('remote.serverAddress') && store.get('remote.clientEnabled') === false) {
+  store.set('remote.serverEnabled', true);
+  store.set('remote.clientEnabled', true);
+  store.set('remote.serverAddress', DEFAULT_SERVER);
+}
+if (store.get('autoStart') === false && store.get('firstRun') === undefined) {
+  store.set('autoStart', true);
+  store.set('firstRun', true); // trigger auto-start registration
+}
 
 let mainWindow = null;
 let tray = null;
@@ -1175,11 +1189,42 @@ ipcMain.handle('get-log-dir', () => logDir);
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createTray();
   startLogging(); // Background diagnostics every 30s
 
-  // Start remote monitoring if configured
+  // First run: register auto-start with the OS
+  if (store.get('firstRun')) {
+    store.set('firstRun', false);
+    try {
+      const exePath = process.execPath;
+      const appPath = app.getAppPath();
+      const launchCmd = exePath.includes('electron') ? `"${exePath}" "${appPath}"` : `"${exePath}"`;
+      if (platform === 'win32') {
+        require('child_process').execSync(
+          `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "SystemPulse" /t REG_SZ /d "${launchCmd}" /f`,
+          { windowsHide: true }
+        );
+      } else if (platform === 'darwin') {
+        const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.cloudnimbus.system-pulse.plist');
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.cloudnimbus.system-pulse</string>
+<key>ProgramArguments</key><array><string>${exePath}</string><string>${appPath}</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>`;
+        fs.writeFileSync(plistPath, plist, 'utf8');
+      } else {
+        const dir = path.join(os.homedir(), '.config', 'autostart');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'system-pulse.desktop'),
+          `[Desktop Entry]\nType=Application\nName=System Pulse\nExec=${launchCmd}\nHidden=false\n`, 'utf8');
+      }
+    } catch (e) { /* auto-start registration failed, non-fatal */ }
+  }
+
+  // Start remote monitoring — both server and client enabled by default
   const remote = store.get('remote');
   if (remote.serverEnabled) startRemoteServer(remote.serverPort || 9475);
   if (remote.clientEnabled && remote.serverAddress) startClientPush();
