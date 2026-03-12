@@ -854,6 +854,70 @@ function startRemoteServer(port) {
       if (client) client.pendingKills = [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(kills));
+    } else if (req.method === 'POST' && req.url === '/remote-exec') {
+      // Queue a command for a remote client to execute
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const { hostname: target, command } = JSON.parse(body);
+          const client = remoteClients.get(target);
+          if (client) {
+            if (!client.pendingCommands) client.pendingCommands = [];
+            const cmdId = 'cmd_' + Date.now();
+            client.pendingCommands.push({ id: cmdId, command, ts: Date.now() });
+            if (!client.commandResults) client.commandResults = {};
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'queued', cmdId }));
+          } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'client not connected' }));
+          }
+        } catch (e) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'bad request' }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/pending-commands') {
+      // Client polls for commands to execute
+      const hostname = req.headers['x-hostname'] || '';
+      const client = remoteClients.get(hostname);
+      const cmds = (client && client.pendingCommands) || [];
+      if (client) client.pendingCommands = [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(cmds));
+    } else if (req.method === 'POST' && req.url === '/command-result') {
+      // Client posts command output back
+      let body = '';
+      req.on('data', chunk => { body += chunk; if (body.length > 5242880) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { hostname: h, cmdId, stdout, stderr, exitCode } = JSON.parse(body);
+          const client = remoteClients.get(h);
+          if (client) {
+            if (!client.commandResults) client.commandResults = {};
+            client.commandResults[cmdId] = { stdout, stderr, exitCode, ts: Date.now() };
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok' }));
+        } catch (e) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'bad request' }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url.startsWith('/command-result/')) {
+      // Server polls for a specific command result
+      const parts = req.url.split('/');
+      const cmdId = parts[2];
+      let found = null;
+      remoteClients.forEach((client) => {
+        if (client.commandResults && client.commandResults[cmdId]) {
+          found = client.commandResults[cmdId];
+          delete client.commandResults[cmdId];
+        }
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(found || { pending: true }));
     } else {
       res.writeHead(404);
       res.end('not found');
@@ -921,9 +985,10 @@ async function pushSnapshotToServer(serverAddress) {
     req.write(payload);
     req.end();
 
-    // Also check for pending kill commands
+    // Check for pending kill commands
+    const myHostname = store.get('remote.machineName') || os.hostname();
     const killReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/pending-kills', method: 'GET',
-      headers: { 'x-hostname': store.get('remote.machineName') || os.hostname() },
+      headers: { 'x-hostname': myHostname },
       timeout: 5000,
     }, (res) => {
       let body = '';
@@ -939,6 +1004,42 @@ async function pushSnapshotToServer(serverAddress) {
     });
     killReq.on('error', () => {});
     killReq.end();
+
+    // Check for pending remote commands
+    const cmdReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/pending-commands', method: 'GET',
+      headers: { 'x-hostname': myHostname },
+      timeout: 5000,
+    }, (cmdRes) => {
+      let cmdBody = '';
+      cmdRes.on('data', chunk => { cmdBody += chunk; });
+      cmdRes.on('end', () => {
+        try {
+          const cmds = JSON.parse(cmdBody);
+          for (const cmd of cmds) {
+            // Execute the command locally
+            exec(cmd.command, { timeout: 30000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+              // Post result back to server
+              const resultPayload = JSON.stringify({
+                hostname: myHostname,
+                cmdId: cmd.id,
+                stdout: (stdout || '').slice(0, 500000),
+                stderr: (stderr || '').slice(0, 100000),
+                exitCode: err ? err.code || 1 : 0,
+              });
+              const resultReq = http.request({ hostname: host, port: parseInt(port) || 9475, path: '/command-result', method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(resultPayload) },
+                timeout: 5000,
+              }, (r) => { r.resume(); });
+              resultReq.on('error', () => {});
+              resultReq.write(resultPayload);
+              resultReq.end();
+            });
+          }
+        } catch (e) {}
+      });
+    });
+    cmdReq.on('error', () => {});
+    cmdReq.end();
   } catch (e) { /* silent */ }
 }
 
