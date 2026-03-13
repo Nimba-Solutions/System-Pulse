@@ -1116,6 +1116,32 @@ function pollServerForCommands(conn, myHostname) {
       try {
         const cmds = JSON.parse(cmdBody);
         for (const cmd of cmds) {
+          // Special commands that System Pulse handles internally
+          if (cmd.command === '__self-update__') {
+            // Git pull and restart cleanly
+            guard.exec(`cd /d "${__dirname}" && git pull`, { timeout: 30000, windowsHide: true }, (err, stdout) => {
+              const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: (stdout || '') + '\nRestarting...', stderr: '', exitCode: 0 });
+              makeRequest(conn, 'POST', '/command-result', resultPayload);
+              setTimeout(() => { app.relaunch(); app.quit(); }, 2000);
+            });
+            continue;
+          }
+          if (cmd.command.startsWith('__launch:')) {
+            const tool = cmd.command.replace('__launch:', '').replace('__', '');
+            const toolPath = path.join(__dirname, '..', tool);
+            guard.exec(`cd /d "${toolPath}" && git pull && start "" npx electron .`, { shell: true, timeout: 60000 }, (err, stdout) => {
+              const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: `Launched ${tool}\n${stdout || ''}`, stderr: '', exitCode: err ? 1 : 0 });
+              makeRequest(conn, 'POST', '/command-result', resultPayload);
+            });
+            continue;
+          }
+          if (cmd.command === '__launch-claude__') {
+            guard.exec('start "Claude Code" cmd /k "set CLAUDECODE= && claude"', { shell: true });
+            const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: 'Claude Code launched', stderr: '', exitCode: 0 });
+            makeRequest(conn, 'POST', '/command-result', resultPayload);
+            continue;
+          }
+
           const cmdTimeout = cmd.command.match(/winget|install|msiexec|choco|setup/i) ? 300000 : 30000;
           guard.exec(cmd.command, { timeout: cmdTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
             const resultPayload = JSON.stringify({
