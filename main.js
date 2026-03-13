@@ -1089,7 +1089,8 @@ function pollServerForCommands(conn, myHostname) {
       try {
         const cmds = JSON.parse(cmdBody);
         for (const cmd of cmds) {
-          exec(cmd.command, { timeout: 30000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+          const cmdTimeout = cmd.command.match(/winget|install|msiexec|choco|setup/i) ? 300000 : 30000;
+          exec(cmd.command, { timeout: cmdTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
             const resultPayload = JSON.stringify({
               hostname: myHostname,
               cmdId: cmd.id,
