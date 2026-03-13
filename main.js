@@ -1040,6 +1040,10 @@ function buildSnapshotPayload(sys, procs) {
   if ((sys.usedMem / sys.totalMem) > 0.9) events.push({ type: 'high-memory', pct: Math.round((sys.usedMem / sys.totalMem) * 100) });
   if (duplicates.length > 0) events.push({ type: 'duplicates', items: duplicates });
 
+  // Include recent healer actions so remote monitoring can see what was auto-fixed
+  const recentHealerActions = healerActions.filter(h => Date.now() - new Date(h.ts).getTime() < 300000);
+  if (recentHealerActions.length > 0) events.push({ type: 'auto-healed', actions: recentHealerActions });
+
   return JSON.stringify({
     hostname: store.get('remote.machineName') || os.hostname(),
     ts: new Date().toISOString(),
@@ -1053,6 +1057,114 @@ function buildSnapshotPayload(sys, procs) {
     events,
     uptime: sys.uptime,
   });
+}
+
+// ─── Auto-Healer ──────────────────────────────────────────────────────────
+// Proactively detects and fixes common performance problems for any user.
+// Runs every snapshot cycle. Escalates through warning → action thresholds.
+
+const KNOWN_BLOATWARE = [
+  // Windows updaters & telemetry
+  'WmiPrvSE.exe', 'CompatTelRunner.exe', 'SearchProtocolHost.exe',
+  'SearchFilterHost.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe',
+  'WUDFHost.exe', 'SgrmBroker.exe', 'SecurityHealthService.exe',
+  // Common app updaters
+  'GoogleUpdate.exe', 'OneDrive.exe', 'DropboxUpdate.exe',
+  'AdobeARMHelper.exe', 'CCXProcess.exe', 'AGSService.exe',
+];
+const NEVER_KILL = ['node.exe', 'explorer.exe', 'csrss.exe', 'winlogon.exe',
+  'services.exe', 'lsass.exe', 'smss.exe', 'wininit.exe', 'System',
+  'svchost.exe', 'dwm.exe', 'electron.exe'];
+
+let highCpuStreak = 0;        // consecutive high-CPU readings
+let healerActions = [];        // log of actions taken
+const HEAL_CPU_WARN = 50;     // start watching
+const HEAL_CPU_ACT = 80;      // take action
+const HEAL_STREAK_THRESHOLD = 3; // consecutive readings before acting
+const ADAPTIVE_SLOW_INTERVAL = 30000; // slow polling under load
+const ADAPTIVE_FAST_INTERVAL = 15000; // normal polling
+
+function autoHeal(sys, procs) {
+  const cpu = sys.cpuPercent;
+  const actions = [];
+
+  if (cpu >= HEAL_CPU_WARN) {
+    highCpuStreak++;
+  } else {
+    // Recovered — restore normal polling if we slowed down
+    if (highCpuStreak >= HEAL_STREAK_THRESHOLD && clientPushInterval) {
+      const remote = store.get('remote');
+      if (remote.clientEnabled && remote.serverAddress) {
+        clearInterval(clientPushInterval);
+        clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), ADAPTIVE_FAST_INTERVAL);
+        actions.push({ action: 'restore-polling', interval: ADAPTIVE_FAST_INTERVAL });
+      }
+    }
+    highCpuStreak = 0;
+    return actions;
+  }
+
+  // After 2 consecutive high readings, slow down polling to reduce our own load
+  if (highCpuStreak === 2 && clientPushInterval) {
+    const remote = store.get('remote');
+    if (remote.clientEnabled && remote.serverAddress) {
+      clearInterval(clientPushInterval);
+      clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), ADAPTIVE_SLOW_INTERVAL);
+      actions.push({ action: 'slow-polling', interval: ADAPTIVE_SLOW_INTERVAL, reason: `CPU at ${cpu}% for 2 readings` });
+    }
+  }
+
+  // After HEAL_STREAK_THRESHOLD consecutive readings above action threshold, act
+  if (highCpuStreak >= HEAL_STREAK_THRESHOLD && cpu >= HEAL_CPU_ACT) {
+    // Find processes we can safely kill
+    const candidates = procs.filter(p =>
+      !NEVER_KILL.includes(p.name) &&
+      p.memMB > 100 && // only bother with processes using real memory
+      KNOWN_BLOATWARE.includes(p.name)
+    );
+
+    for (const p of candidates) {
+      try {
+        process.kill(p.pid);
+        actions.push({ action: 'killed', name: p.name, pid: p.pid, memMB: p.memMB, reason: `CPU ${cpu}% for ${highCpuStreak} readings` });
+      } catch (_) { /* access denied or already dead */ }
+    }
+
+    // Special: kill WmiPrvSE if CPU is critically high — it respawns clean
+    if (cpu >= 90) {
+      const wmis = procs.filter(p => p.name === 'WmiPrvSE.exe');
+      for (const p of wmis) {
+        try {
+          process.kill(p.pid);
+          actions.push({ action: 'killed', name: 'WmiPrvSE.exe', pid: p.pid, reason: 'CPU >= 90%, clearing WMI backlog' });
+        } catch (_) { /* needs admin — will fail silently */ }
+      }
+    }
+
+    // If we couldn't kill anything (access denied), try via taskkill command
+    if (actions.filter(a => a.action === 'killed').length === 0 && platform === 'win32') {
+      const killTargets = candidates.map(p => p.name).filter((v, i, a) => a.indexOf(v) === i);
+      for (const name of killTargets) {
+        guard.exec(`taskkill /f /im "${name}"`, { windowsHide: true, timeout: 5000 });
+        actions.push({ action: 'taskkill-attempted', name, reason: `CPU ${cpu}% for ${highCpuStreak} readings` });
+      }
+    }
+  }
+
+  // Log actions
+  if (actions.length > 0) {
+    healerActions.push({ ts: new Date().toISOString(), cpu, actions });
+    for (const a of actions) {
+      const msg = a.action === 'killed'
+        ? `Auto-healed: killed ${a.name} (PID ${a.pid}) — ${a.reason}`
+        : a.action === 'slow-polling'
+        ? `Adaptive: slowed polling to ${a.interval}ms — ${a.reason}`
+        : `Auto-heal: ${a.action} ${a.name || ''} — ${a.reason || ''}`;
+      console.log(`[auto-healer] ${msg}`);
+    }
+  }
+
+  return actions;
 }
 
 function pollServerForCommands(conn, myHostname) {
@@ -1136,6 +1248,10 @@ async function pushSnapshotToServer(serverAddress) {
     const conn = getConnectionParams(serverAddress);
     const sys = getSystemInfo();
     const procs = await getProcessList();
+
+    // Run auto-healer every cycle — proactively fix problems for any user
+    autoHeal(sys, procs);
+
     const payload = buildSnapshotPayload(sys, procs);
     const myHostname = store.get('remote.machineName') || os.hostname();
     const isCloud = serverAddress.includes('cloudnimbusllc.com') || serverAddress.includes('nimbus');
@@ -1183,6 +1299,7 @@ ipcMain.handle('kill-duplicates', (_, name) => killDuplicates(name));
 ipcMain.handle('get-network-usage', () => getNetworkUsage());
 ipcMain.handle('run-diagnostic', () => runDiagnostic());
 ipcMain.handle('get-platform', () => platform);
+ipcMain.handle('get-healer-log', () => healerActions.slice(-50));
 
 ipcMain.handle('set-auto-start', async (_, enabled) => {
   const exePath = process.execPath;
