@@ -1141,13 +1141,17 @@ function autoHeal(sys, procs) {
       }
     }
 
-    // If we couldn't kill anything (access denied), try via taskkill command
+    // If we couldn't kill anything (empty process list or access denied), blind-kill known offenders
     if (actions.filter(a => a.action === 'killed').length === 0 && platform === 'win32') {
-      const killTargets = candidates.map(p => p.name).filter((v, i, a) => a.indexOf(v) === i);
-      for (const name of killTargets) {
-        guard.exec(`taskkill /f /im "${name}"`, { windowsHide: true, timeout: 5000 });
-        actions.push({ action: 'taskkill-attempted', name, reason: `CPU ${cpu}% for ${highCpuStreak} readings` });
+      // When CPU is so high tasklist returns nothing, we can't see what's eating CPU.
+      // Blind-kill the usual suspects — they all respawn cleanly.
+      const blindTargets = cpu >= 90
+        ? ['WmiPrvSE.exe', 'CompatTelRunner.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe', 'SearchProtocolHost.exe']
+        : KNOWN_BLOATWARE;
+      for (const name of blindTargets) {
+        guard.exec(`taskkill /f /im "${name}" 2>NUL`, { windowsHide: true, timeout: 5000 });
       }
+      actions.push({ action: 'blind-taskkill', targets: blindTargets, reason: `CPU ${cpu}% for ${highCpuStreak} readings, process list empty` });
     }
   }
 
