@@ -42,6 +42,17 @@ function track(child) {
   child.on('error', () => tracked.delete(child.pid));
 }
 
+/** Prune PIDs that are no longer alive (killed externally via taskkill etc.) */
+function pruneDeadPids() {
+  for (const pid of tracked) {
+    try {
+      process.kill(pid, 0); // signal 0 = just check if alive
+    } catch (_) {
+      tracked.delete(pid);
+    }
+  }
+}
+
 // ─── Guarded exec ───────────────────────────────────────────────
 
 function guardedExec(command, options, callback) {
@@ -53,7 +64,12 @@ function guardedExec(command, options, callback) {
   callback = callback || (() => {});
 
   if (tracked.size >= MAX_CHILDREN) {
-    warn(`Refusing to spawn — ${tracked.size} child processes already alive (limit: ${MAX_CHILDREN})`);
+    // Before refusing, prune dead PIDs — they may have been killed externally
+    pruneDeadPids();
+  }
+
+  if (tracked.size >= MAX_CHILDREN) {
+    warn(`Refusing to spawn — ${tracked.size} child processes actually alive (limit: ${MAX_CHILDREN})`);
     const err = new Error(`Process guard: concurrency limit reached (${MAX_CHILDREN})`);
     return callback(err, '', '');
   }
@@ -68,7 +84,10 @@ function guardedExec(command, options, callback) {
 function guardedExecPromise(command, timeout) {
   return new Promise((resolve, reject) => {
     if (tracked.size >= MAX_CHILDREN) {
-      warn(`Refusing to spawn — ${tracked.size} child processes already alive (limit: ${MAX_CHILDREN})`);
+      pruneDeadPids();
+    }
+    if (tracked.size >= MAX_CHILDREN) {
+      warn(`Refusing to spawn — ${tracked.size} child processes actually alive (limit: ${MAX_CHILDREN})`);
       return reject(new Error(`Process guard: concurrency limit reached (${MAX_CHILDREN})`));
     }
 
