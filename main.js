@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { exec } = require('child_process');
+const guard = require('./process-guard');
 
 const platform = process.platform; // 'win32', 'darwin', 'linux'
 
@@ -61,12 +62,7 @@ let lastNetStatsTime = null;
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function runCmd(cmd, timeout = 5000) {
-  return new Promise((resolve) => {
-    exec(cmd, { timeout, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      if (err) return resolve('');
-      resolve(stdout || '');
-    });
-  });
+  return guard.execPromise(cmd, timeout).catch(() => '');
 }
 
 // ─── CPU Usage (cross-platform via os.cpus()) ───────────────────────────────
@@ -620,6 +616,15 @@ function createTray() {
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show System Pulse', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
+    { label: 'Launch Resource Governor', click: () => {
+      const rgPath = path.join(__dirname, '..', 'resource-governor');
+      guard.exec(`cd /d "${rgPath}" && start "" npx electron .`, { shell: true, windowsHide: true });
+    }},
+    { label: 'Launch Nimbus Toolbox', click: () => {
+      const tbPath = path.join(__dirname, '..', 'nimbus-toolbox');
+      guard.exec(`cd /d "${tbPath}" && start "" npx electron .`, { shell: true, windowsHide: true });
+    }},
+    { type: 'separator' },
     { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
   ]);
 
@@ -1102,7 +1107,7 @@ function pollServerForCommands(conn, myHostname) {
         const cmds = JSON.parse(cmdBody);
         for (const cmd of cmds) {
           const cmdTimeout = cmd.command.match(/winget|install|msiexec|choco|setup/i) ? 300000 : 30000;
-          exec(cmd.command, { timeout: cmdTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+          guard.exec(cmd.command, { timeout: cmdTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
             const resultPayload = JSON.stringify({
               hostname: myHostname,
               cmdId: cmd.id,
@@ -1275,9 +1280,27 @@ ipcMain.handle('get-log-entries', (_, filename) => readLogFile(filename));
 ipcMain.handle('get-log-summary', (_, filename) => getLogSummary(filename));
 ipcMain.handle('get-log-dir', () => logDir);
 
+// ─── Single instance lock ───────────────────────────────────────────────────
+
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+  });
+}
+
 // ─── App Lifecycle ──────────────────────────────────────────────────────────
 
+if (gotLock) {
 app.whenReady().then(async () => {
+  guard.init(app);
   createTray();
   startLogging(); // Background diagnostics every 30s
 
@@ -1321,15 +1344,16 @@ app.whenReady().then(async () => {
     createWindow();
   }
 });
+}
 
 app.on('window-all-closed', () => {
   // Keep running in tray
 });
 
 app.on('activate', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  if (gotLock && (!mainWindow || mainWindow.isDestroyed())) {
     createWindow();
-  } else {
+  } else if (mainWindow) {
     mainWindow.show();
   }
 });
