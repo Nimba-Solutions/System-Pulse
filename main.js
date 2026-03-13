@@ -578,18 +578,39 @@ function createTray() {
 
   const projectsRoot = platform === 'darwin' ? path.join(os.homedir(), 'Projects') : 'C:\\Projects';
 
+  // Dynamically discover projects on this machine instead of hardcoding
+  function buildProjectSubmenu() {
+    const items = [
+      { label: projectsRoot, click: () => { guard.exec(claudeProjectCmd(projectsRoot, 'Claude'), { shell: true }); }},
+    ];
+    try {
+      const entries = fs.readdirSync(projectsRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const fullPath = path.join(projectsRoot, entry.name);
+        // Only show directories that look like projects (have package.json, .git, or any code files)
+        const hasProject = fs.existsSync(path.join(fullPath, 'package.json')) ||
+                           fs.existsSync(path.join(fullPath, '.git')) ||
+                           fs.existsSync(path.join(fullPath, 'main.js'));
+        if (hasProject) {
+          items.push({
+            label: entry.name,
+            click: () => { guard.exec(claudeProjectCmd(fullPath, `Claude ${entry.name}`), { shell: true }); },
+          });
+        }
+      }
+    } catch (_) { /* projectsRoot doesn't exist yet — just show the root entry */ }
+    return items;
+  }
+
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show System Pulse', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
     { label: 'Launch Claude Code', click: () => {
       guard.exec(launchClaudeCmd, { shell: true, windowsHide: false });
     }},
-    { label: 'Launch Claude Code (Projects)', submenu: [
-      { label: projectsRoot, click: () => { guard.exec(claudeProjectCmd(projectsRoot, 'Claude'), { shell: true }); }},
-      { label: 'MF Hub', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'MF-main'), 'Claude MF'), { shell: true }); }},
-      { label: 'System Pulse', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'system-pulse'), 'Claude SP'), { shell: true }); }},
-      { label: 'Resource Governor', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'resource-governor'), 'Claude RG'), { shell: true }); }},
-    ]},
+    { label: 'Launch Claude Code (Projects)', submenu: buildProjectSubmenu() },
     { type: 'separator' },
     { label: 'Launch Resource Governor', click: () => {
       const rgPath = path.join(__dirname, '..', 'resource-governor');
