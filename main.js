@@ -1167,7 +1167,7 @@ function autoHeal(sys, procs) {
       // When CPU is so high tasklist returns nothing, we can't see what's eating CPU.
       // Blind-kill the usual suspects — they all respawn cleanly.
       const blindTargets = cpu >= 90
-        ? ['WmiPrvSE.exe', 'CompatTelRunner.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe', 'SearchProtocolHost.exe']
+        ? ['WmiPrvSE.exe', 'powershell.exe', 'CompatTelRunner.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe', 'SearchProtocolHost.exe', 'wmic.exe', 'conhost.exe']
         : KNOWN_BLOATWARE;
       for (const name of blindTargets) {
         guard.exec(`taskkill /f /im "${name}" 2>NUL`, { windowsHide: true, timeout: 5000 });
