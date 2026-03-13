@@ -99,16 +99,16 @@ function killAll() {
 function cleanupOrphans() {
   if (os.platform() !== 'win32') return;
 
-  const cmd = `powershell -NoProfile -Command "Get-Process -Name ${ORPHAN_PROCESS_NAMES.map(n => `'${n.replace('.exe', '')}'`).join(',')} -ErrorAction SilentlyContinue | ForEach-Object { try { $parent = (Get-CimInstance Win32_Process -Filter \\"ProcessId=$($_.Id)\\" -ErrorAction SilentlyContinue).ParentProcessId; $parentAlive = $false; try { Get-Process -Id $parent -ErrorAction Stop | Out-Null; $parentAlive = $true } catch {}; if (-not $parentAlive) { $_.Id } } catch {} }"`;
+  // Use taskkill-based cleanup instead of PowerShell to avoid spawning more of the problem
+  const names = ORPHAN_PROCESS_NAMES.map(n => n.replace('.exe', ''));
+  const cmd = `tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe" /fi "MEMUSAGE gt 0"`;
 
-  exec(cmd, { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+  exec(cmd, { windowsHide: true, timeout: 10000 }, (err, stdout) => {
     if (err || !stdout) return;
-    const pids = stdout.trim().split(/\r?\n/).map(p => parseInt(p.trim(), 10)).filter(p => p > 0);
-    if (pids.length > 0) {
-      log(`Cleaning up ${pids.length} orphaned process(es)`);
-      for (const pid of pids) {
-        try { process.kill(pid); } catch (_) { /* already dead */ }
-      }
+    const lines = (stdout || '').trim().split('\n').filter(l => l.includes(','));
+    if (lines.length > ORPHAN_WARN_THRESHOLD) {
+      log(`Found ${lines.length} powershell processes (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
+      exec('taskkill /f /im powershell.exe /fi "WINDOWTITLE ne Administrator*"', { windowsHide: true, timeout: 10000 });
     }
   });
 }
@@ -120,16 +120,13 @@ function startPatrol() {
   if (os.platform() !== 'win32') return;
 
   patrolTimer = setInterval(() => {
-    const names = ORPHAN_PROCESS_NAMES.map(n => `'${n.replace('.exe', '')}'`).join(',');
-    const cmd = `powershell -NoProfile -Command "(Get-Process -Name ${names} -ErrorAction SilentlyContinue).Count"`;
-
-    exec(cmd, { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+    // Use tasklist instead of PowerShell to avoid spawning more of the problem
+    exec('tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe"', { windowsHide: true, timeout: 10000 }, (err, stdout) => {
       if (err) return;
-      const count = parseInt((stdout || '').trim(), 10) || 0;
-      if (count > ORPHAN_WARN_THRESHOLD) {
-        warn(`${count} shell helper processes detected (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
-        // Kill the oldest ones (those whose parent PID no longer exists)
-        cleanupOrphans();
+      const lines = (stdout || '').trim().split('\n').filter(l => l.includes('powershell'));
+      if (lines.length > ORPHAN_WARN_THRESHOLD) {
+        warn(`${lines.length} powershell processes detected (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
+        exec('taskkill /f /im powershell.exe', { windowsHide: true, timeout: 10000 });
       }
     });
   }, PATROL_INTERVAL_MS);
