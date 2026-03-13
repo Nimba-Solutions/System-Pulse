@@ -9,8 +9,10 @@
 const { exec, spawn } = require('child_process');
 const os = require('os');
 
+const platform = os.platform();
 const MAX_CHILDREN = 20;
-const ORPHAN_PROCESS_NAMES = ['powershell.exe', 'wmic.exe', 'conhost.exe'];
+const ORPHAN_PROCESS_NAMES_WIN = ['powershell.exe', 'wmic.exe', 'conhost.exe'];
+const ORPHAN_PROCESS_NAMES_MAC = ['bash', 'zsh']; // orphan shells spawned by System Pulse
 const ORPHAN_WARN_THRESHOLD = 30;
 const PATROL_INTERVAL_MS = 10000;
 
@@ -42,7 +44,7 @@ function track(child) {
   child.on('error', () => tracked.delete(child.pid));
 }
 
-/** Prune PIDs that are no longer alive (killed externally via taskkill etc.) */
+/** Prune PIDs that are no longer alive (killed externally via taskkill/kill etc.) */
 function pruneDeadPids() {
   for (const pid of tracked) {
     try {
@@ -113,41 +115,74 @@ function killAll() {
   tracked.clear();
 }
 
-// ─── Orphan cleanup (Windows) ───────────────────────────────────
+// ─── Orphan cleanup (platform-aware) ────────────────────────────
 
 function cleanupOrphans() {
-  if (os.platform() !== 'win32') return;
-
-  // Use taskkill-based cleanup instead of PowerShell to avoid spawning more of the problem
-  const names = ORPHAN_PROCESS_NAMES.map(n => n.replace('.exe', ''));
-  const cmd = `tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe" /fi "MEMUSAGE gt 0"`;
-
-  exec(cmd, { windowsHide: true, timeout: 10000 }, (err, stdout) => {
-    if (err || !stdout) return;
-    const lines = (stdout || '').trim().split('\n').filter(l => l.includes(','));
-    if (lines.length > ORPHAN_WARN_THRESHOLD) {
-      log(`Found ${lines.length} powershell processes (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
-      exec('taskkill /f /im powershell.exe /fi "WINDOWTITLE ne Administrator*"', { windowsHide: true, timeout: 10000 });
-    }
-  });
+  if (platform === 'win32') {
+    // Use taskkill-based cleanup instead of PowerShell to avoid spawning more of the problem
+    const cmd = `tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe" /fi "MEMUSAGE gt 0"`;
+    exec(cmd, { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+      if (err || !stdout) return;
+      const lines = (stdout || '').trim().split('\n').filter(l => l.includes(','));
+      if (lines.length > ORPHAN_WARN_THRESHOLD) {
+        log(`Found ${lines.length} powershell processes (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
+        exec('taskkill /f /im powershell.exe /fi "WINDOWTITLE ne Administrator*"', { windowsHide: true, timeout: 10000 });
+      }
+    });
+  } else if (platform === 'darwin') {
+    // On macOS, check for orphan shell processes spawned by Electron
+    const ppid = process.pid;
+    exec(`pgrep -P ${ppid}`, { timeout: 10000 }, (err, stdout) => {
+      if (err || !stdout) return;
+      const childPids = stdout.trim().split('\n').filter(Boolean);
+      if (childPids.length > ORPHAN_WARN_THRESHOLD) {
+        log(`Found ${childPids.length} child processes of PID ${ppid} (threshold: ${ORPHAN_WARN_THRESHOLD}) — cleaning up`);
+        for (const cpid of childPids) {
+          const pid = parseInt(cpid, 10);
+          if (pid > 0 && !tracked.has(pid)) {
+            try { process.kill(pid, 'SIGTERM'); } catch (_) {}
+          }
+        }
+      }
+    });
+  }
+  // Linux: no special orphan cleanup needed
 }
 
 // ─── Proactive patrol ───────────────────────────────────────────
 
 function startPatrol() {
   if (patrolTimer) return;
-  if (os.platform() !== 'win32') return;
+  if (platform !== 'win32' && platform !== 'darwin') return;
 
   patrolTimer = setInterval(() => {
-    // Use tasklist instead of PowerShell to avoid spawning more of the problem
-    exec('tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe"', { windowsHide: true, timeout: 10000 }, (err, stdout) => {
-      if (err) return;
-      const lines = (stdout || '').trim().split('\n').filter(l => l.includes('powershell'));
-      if (lines.length > ORPHAN_WARN_THRESHOLD) {
-        warn(`${lines.length} powershell processes detected (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
-        exec('taskkill /f /im powershell.exe', { windowsHide: true, timeout: 10000 });
-      }
-    });
+    if (platform === 'win32') {
+      // Use tasklist instead of PowerShell to avoid spawning more of the problem
+      exec('tasklist /fo csv /nh /fi "IMAGENAME eq powershell.exe"', { windowsHide: true, timeout: 10000 }, (err, stdout) => {
+        if (err) return;
+        const lines = (stdout || '').trim().split('\n').filter(l => l.includes('powershell'));
+        if (lines.length > ORPHAN_WARN_THRESHOLD) {
+          warn(`${lines.length} powershell processes detected (threshold: ${ORPHAN_WARN_THRESHOLD}) — killing excess`);
+          exec('taskkill /f /im powershell.exe', { windowsHide: true, timeout: 10000 });
+        }
+      });
+    } else if (platform === 'darwin') {
+      // Check for orphan child processes on macOS
+      const ppid = process.pid;
+      exec(`pgrep -P ${ppid}`, { timeout: 10000 }, (err, stdout) => {
+        if (err || !stdout) return;
+        const childPids = stdout.trim().split('\n').filter(Boolean);
+        if (childPids.length > ORPHAN_WARN_THRESHOLD) {
+          warn(`${childPids.length} child processes of PID ${ppid} detected (threshold: ${ORPHAN_WARN_THRESHOLD}) — cleaning up`);
+          for (const cpid of childPids) {
+            const pid = parseInt(cpid, 10);
+            if (pid > 0 && !tracked.has(pid)) {
+              try { process.kill(pid, 'SIGTERM'); } catch (_) {}
+            }
+          }
+        }
+      });
+    }
   }, PATROL_INTERVAL_MS);
 
   // Don't let the patrol timer keep the process alive

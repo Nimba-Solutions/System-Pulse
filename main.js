@@ -452,7 +452,9 @@ async function runDiagnostic() {
   for (const [name, count] of Object.entries(nameCounts)) {
     if (count >= 3) {
       // Ignore common system processes that legitimately have many instances
-      const systemProcs = ['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe'];
+      const systemProcs = platform === 'darwin'
+        ? ['kernel_task', 'launchd', 'mds_stores', 'Google Chrome Helper', 'com.apple.WebKit', 'Safari', 'firefox']
+        : ['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'firefox.exe'];
       if (!systemProcs.includes(name)) {
         findings.push({
           severity: 'warning',
@@ -613,26 +615,46 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip('System Pulse — CPU: ...');
 
+  const launchClaudeCmd = platform === 'darwin'
+    ? 'open -a Terminal --args bash -lc "claude"'
+    : 'start "Claude Code" cmd /k "set CLAUDECODE= && claude"';
+
+  const claudeProjectCmd = (dir, label) => {
+    if (platform === 'darwin') {
+      return `open -a Terminal --args bash -lc "cd '${dir}' && claude"`;
+    }
+    return `start "${label}" cmd /k "cd /d ${dir} && set CLAUDECODE= && claude"`;
+  };
+
+  const launchElectronApp = (appPath) => {
+    if (platform === 'darwin') {
+      return `cd "${appPath}" && npx electron . &`;
+    }
+    return `cd /d "${appPath}" && start "" npx electron .`;
+  };
+
+  const projectsRoot = platform === 'darwin' ? path.join(os.homedir(), 'Projects') : 'C:\\Projects';
+
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show System Pulse', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
     { label: 'Launch Claude Code', click: () => {
-      guard.exec('start "Claude Code" cmd /k "set CLAUDECODE= && claude"', { shell: true, windowsHide: false });
+      guard.exec(launchClaudeCmd, { shell: true, windowsHide: false });
     }},
     { label: 'Launch Claude Code (Projects)', submenu: [
-      { label: 'C:\\Projects', click: () => { guard.exec('start "Claude" cmd /k "cd /d C:\\Projects && set CLAUDECODE= && claude"', { shell: true }); }},
-      { label: 'MF Hub', click: () => { guard.exec('start "Claude MF" cmd /k "cd /d C:\\Projects\\MF-main && set CLAUDECODE= && claude"', { shell: true }); }},
-      { label: 'System Pulse', click: () => { guard.exec('start "Claude SP" cmd /k "cd /d C:\\Projects\\system-pulse && set CLAUDECODE= && claude"', { shell: true }); }},
-      { label: 'Resource Governor', click: () => { guard.exec('start "Claude RG" cmd /k "cd /d C:\\Projects\\resource-governor && set CLAUDECODE= && claude"', { shell: true }); }},
+      { label: projectsRoot, click: () => { guard.exec(claudeProjectCmd(projectsRoot, 'Claude'), { shell: true }); }},
+      { label: 'MF Hub', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'MF-main'), 'Claude MF'), { shell: true }); }},
+      { label: 'System Pulse', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'system-pulse'), 'Claude SP'), { shell: true }); }},
+      { label: 'Resource Governor', click: () => { guard.exec(claudeProjectCmd(path.join(projectsRoot, 'resource-governor'), 'Claude RG'), { shell: true }); }},
     ]},
     { type: 'separator' },
     { label: 'Launch Resource Governor', click: () => {
       const rgPath = path.join(__dirname, '..', 'resource-governor');
-      guard.exec(`cd /d "${rgPath}" && start "" npx electron .`, { shell: true, windowsHide: true });
+      guard.exec(launchElectronApp(rgPath), { shell: true, windowsHide: true });
     }},
     { label: 'Launch Nimbus Toolbox', click: () => {
       const tbPath = path.join(__dirname, '..', 'nimbus-toolbox');
-      guard.exec(`cd /d "${tbPath}" && start "" npx electron .`, { shell: true, windowsHide: true });
+      guard.exec(launchElectronApp(tbPath), { shell: true, windowsHide: true });
     }},
     { type: 'separator' },
     { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
@@ -694,7 +716,7 @@ async function logSnapshot() {
       nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
     }
     const duplicates = Object.entries(nameCounts)
-      .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'Code.exe'].includes(name))
+      .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'Code.exe', 'kernel_task', 'launchd', 'mds_stores', 'Google Chrome Helper', 'com.apple.WebKit'].includes(name))
       .map(([name, count]) => ({ name, count }));
 
     // Events/anomalies
@@ -1067,7 +1089,7 @@ function buildSnapshotPayload(sys, procs) {
   const nameCounts = {};
   for (const p of procs) nameCounts[p.name] = (nameCounts[p.name] || 0) + 1;
   const duplicates = Object.entries(nameCounts)
-    .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe'].includes(name))
+    .filter(([name, count]) => count > 3 && !['svchost.exe', 'RuntimeBroker.exe', 'conhost.exe', 'csrss.exe', 'chrome.exe', 'msedge.exe', 'kernel_task', 'launchd', 'mds_stores', 'Google Chrome Helper', 'com.apple.WebKit'].includes(name))
     .map(([name, count]) => ({ name, count }));
 
   const events = [];
@@ -1119,7 +1141,8 @@ function pollServerForCommands(conn, myHostname) {
           // Special commands that System Pulse handles internally
           if (cmd.command === '__self-update__') {
             // Git pull and restart cleanly
-            guard.exec(`cd /d "${__dirname}" && git pull`, { timeout: 30000, windowsHide: true }, (err, stdout) => {
+            const cdCmd = platform === 'win32' ? `cd /d "${__dirname}"` : `cd "${__dirname}"`;
+            guard.exec(`${cdCmd} && git pull`, { timeout: 30000, windowsHide: true }, (err, stdout) => {
               const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: (stdout || '') + '\nRestarting...', stderr: '', exitCode: 0 });
               makeRequest(conn, 'POST', '/command-result', resultPayload);
               setTimeout(() => { app.relaunch(); app.quit(); }, 2000);
@@ -1129,20 +1152,26 @@ function pollServerForCommands(conn, myHostname) {
           if (cmd.command.startsWith('__launch:')) {
             const tool = cmd.command.replace('__launch:', '').replace('__', '');
             const toolPath = path.join(__dirname, '..', tool);
-            guard.exec(`cd /d "${toolPath}" && git pull && start "" npx electron .`, { shell: true, timeout: 60000 }, (err, stdout) => {
+            const launchToolCmd = platform === 'win32'
+              ? `cd /d "${toolPath}" && git pull && start "" npx electron .`
+              : `cd "${toolPath}" && git pull && npx electron . &`;
+            guard.exec(launchToolCmd, { shell: true, timeout: 60000 }, (err, stdout) => {
               const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: `Launched ${tool}\n${stdout || ''}`, stderr: '', exitCode: err ? 1 : 0 });
               makeRequest(conn, 'POST', '/command-result', resultPayload);
             });
             continue;
           }
           if (cmd.command === '__launch-claude__') {
-            guard.exec('start "Claude Code" cmd /k "set CLAUDECODE= && claude"', { shell: true });
+            const claudeLaunchCmd = platform === 'darwin'
+              ? 'open -a Terminal --args bash -lc "claude"'
+              : 'start "Claude Code" cmd /k "set CLAUDECODE= && claude"';
+            guard.exec(claudeLaunchCmd, { shell: true });
             const resultPayload = JSON.stringify({ hostname: myHostname, cmdId: cmd.id, stdout: 'Claude Code launched', stderr: '', exitCode: 0 });
             makeRequest(conn, 'POST', '/command-result', resultPayload);
             continue;
           }
 
-          const cmdTimeout = cmd.command.match(/winget|install|msiexec|choco|setup/i) ? 300000 : 30000;
+          const cmdTimeout = cmd.command.match(/winget|install|msiexec|choco|setup|brew|port|mas/i) ? 300000 : 30000;
           guard.exec(cmd.command, { timeout: cmdTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
             const resultPayload = JSON.stringify({
               hostname: myHostname,
