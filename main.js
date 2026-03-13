@@ -616,6 +616,16 @@ function createTray() {
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Show System Pulse', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
+    { label: 'Launch Claude Code', click: () => {
+      guard.exec('start "Claude Code" cmd /k "set CLAUDECODE= && claude"', { shell: true, windowsHide: false });
+    }},
+    { label: 'Launch Claude Code (Projects)', submenu: [
+      { label: 'C:\\Projects', click: () => { guard.exec('start "Claude" cmd /k "cd /d C:\\Projects && set CLAUDECODE= && claude"', { shell: true }); }},
+      { label: 'MF Hub', click: () => { guard.exec('start "Claude MF" cmd /k "cd /d C:\\Projects\\MF-main && set CLAUDECODE= && claude"', { shell: true }); }},
+      { label: 'System Pulse', click: () => { guard.exec('start "Claude SP" cmd /k "cd /d C:\\Projects\\system-pulse && set CLAUDECODE= && claude"', { shell: true }); }},
+      { label: 'Resource Governor', click: () => { guard.exec('start "Claude RG" cmd /k "cd /d C:\\Projects\\resource-governor && set CLAUDECODE= && claude"', { shell: true }); }},
+    ]},
+    { type: 'separator' },
     { label: 'Launch Resource Governor', click: () => {
       const rgPath = path.join(__dirname, '..', 'resource-governor');
       guard.exec(`cd /d "${rgPath}" && start "" npx electron .`, { shell: true, windowsHide: true });
