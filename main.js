@@ -129,11 +129,23 @@ async function getProcessList() {
 
 async function getProcessListWindows() {
   // Use wmic — much lighter than PowerShell for polling
+  // Increased timeout from 8s to 20s so process data is available even under heavy load
   const raw = await runCmd(
     'wmic process get Name,ProcessId,WorkingSetSize,KernelModeTime,UserModeTime /format:csv',
-    8000
+    20000
   );
-  if (!raw) return [];
+  if (!raw) {
+    // Fallback: if WMI times out (e.g. machine at 100% CPU), use tasklist which is lighter
+    const fallback = await runCmd('tasklist /fo csv /nh', 15000);
+    if (fallback) {
+      const lines = fallback.split('\n').filter(l => l.trim().length > 0);
+      return lines.slice(0, 20).map(line => {
+        const cols = line.replace(/"/g, '').split(',');
+        return { name: cols[0] || '?', pid: parseInt(cols[1], 10) || 0, cpu: 0, memMB: Math.round((parseInt(cols[4]?.replace(/[, K]/g, ''), 10) || 0) / 1024), status: 'Running' };
+      }).filter(p => p.pid > 0);
+    }
+    return [];
+  }
 
   const lines = raw.split('\n').filter(l => l.trim().length > 0);
   if (lines.length < 2) return [];
