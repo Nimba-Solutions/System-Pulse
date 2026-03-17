@@ -54,6 +54,28 @@
       letter-spacing: 0.5px;
     }
     .health-badge.ok { background: #1c3a1c; color: #44cc44; border: 1px solid #2a5a2a; }
+    .mode-badge {
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .mode-badge .mode-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .mode-badge.lan { background: #1c2a3a; color: #44aaff; border: 1px solid #2a4a6a; }
+    .mode-badge.lan .mode-dot { background: #44aaff; }
+    .mode-badge.cloud { background: #2a1c3a; color: #aa88ff; border: 1px solid #4a2a6a; }
+    .mode-badge.cloud .mode-dot { background: #aa88ff; }
+    .mode-badge.offline { background: #3a1c1c; color: #ff5555; border: 1px solid #6a2a2a; }
+    .mode-badge.offline .mode-dot { background: #ff5555; }
     .health-badge.warning { background: #3a2a0a; color: #f59e0b; border: 1px solid #5a4a1a; }
     .health-badge.critical { background: #4a1c1c; color: #ef4444; border: 1px solid #6a2a2a; }
 
@@ -495,6 +517,7 @@
   <div class="header-left">
     <h1><span>System</span> Pulse</h1>
     <span class="health-badge ok" id="healthBadge">HEALTHY</span>
+    <span class="mode-badge cloud" id="modeBadge"><span class="mode-dot"></span>CLOUD</span>
   </div>
   <div class="branding">
     Powered by <a href="https://cloudnimbus.dev" target="_blank">Cloud Nimbus LLC</a>
@@ -1477,6 +1500,26 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     }
   });
 });
+
+// ─── Connection Mode Badge ──────────────────────────────────────────────────
+function updateModeBadge(mode, peer) {
+  const badge = document.getElementById('modeBadge');
+  badge.className = 'mode-badge ' + mode;
+  const labels = { lan: 'LAN', cloud: 'CLOUD', offline: 'OFFLINE' };
+  const label = labels[mode] || mode.toUpperCase();
+  const peerTip = peer ? ` — ${peer}` : '';
+  badge.title = mode === 'lan' ? `Direct LAN connection to ${peer || 'peer'}` : mode === 'cloud' ? 'Routing through cloudnimbusllc.com (60s interval)' : 'No connection';
+  badge.innerHTML = `<span class="mode-dot"></span>${label}${mode === 'lan' && peer ? ' <span style="opacity:0.6;font-size:10px;font-weight:400">' + peer.split(':')[0] + '</span>' : ''}`;
+}
+
+(async () => {
+  try {
+    const { mode, peer } = await window.api.getConnectionMode();
+    updateModeBadge(mode, peer);
+  } catch (_) {}
+})();
+
+window.api.onConnectionMode(({ mode, peer }) => updateModeBadge(mode, peer));
 
 // ─── Start Polling ──────────────────────────────────────────────────────────
 pollSystemInfo();

@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
   setAutoStart: (v) => ipcRenderer.invoke('set-auto-start', v),
 
+  // Connection mode
+  getConnectionMode: () => ipcRenderer.invoke('get-connection-mode'),
+  onConnectionMode: (cb) => ipcRenderer.on('connection-mode', (_, data) => cb(data)),
+
   // Remote monitoring
   getRemoteSettings: () => ipcRenderer.invoke('get-remote-settings'),
   saveRemoteSettings: (s) => ipcRenderer.invoke('save-remote-settings', s),

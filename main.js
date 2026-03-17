@@ -20,7 +20,173 @@ const http = require('http');
 const https = require('https');
 
 const DEFAULT_SERVER = 'cloudnimbusllc.com';  // Cloud Nimbus hosted server
-const LAN_SERVER = '192.168.1.172:9475';      // Local LAN fallback
+const LAN_PORT = 9475;
+
+// ─── Connection Mode ────────────────────────────────────────────────────────
+// Prefer LAN when available (free, fast), fall back to cloud (costs Redis ops).
+const CLOUD_INTERVAL = 60000;   // 60s when pushing to cloud (saves Redis quota)
+const LAN_INTERVAL = 15000;     // 15s over LAN (free, local traffic only)
+let connectionMode = 'cloud';   // 'lan' | 'cloud' | 'offline'
+let lanPeerAddress = null;      // e.g. '192.168.1.172:9475' — dynamically discovered
+let lanProbeTimer = null;
+
+// Get all local IPv4 addresses for this machine
+function getLocalIPs() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
+    }
+  }
+  return ips;
+}
+
+// Probe a single host:port to see if it's running System Pulse
+function probeHost(host, port, cb) {
+  const req = http.request({ hostname: host, port, path: '/ping', method: 'GET', timeout: 2000 }, (res) => {
+    let body = '';
+    res.on('data', chunk => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        cb(data && data.status === 'ok' && data.hostname !== os.hostname());
+      } catch (_) { cb(false); }
+    });
+  });
+  req.on('error', () => cb(false));
+  req.on('timeout', () => { req.destroy(); cb(false); });
+  req.end();
+}
+
+// Discover LAN peers: check known peers from cloud + scan local subnet
+function discoverLanPeers(cb) {
+  const myIPs = getLocalIPs();
+  const candidates = new Set();
+
+  // Add any peers the cloud server told us about
+  for (const [, client] of remoteClients) {
+    if (client.lastSnapshot && client.lastSnapshot.lanIPs) {
+      for (const ip of client.lastSnapshot.lanIPs) {
+        if (!myIPs.includes(ip)) candidates.add(ip);
+      }
+    }
+  }
+
+  // Also scan peers we learned from cloud snapshots received via the server
+  const knownPeerIPs = store.get('knownPeerIPs') || [];
+  for (const ip of knownPeerIPs) {
+    if (!myIPs.includes(ip)) candidates.add(ip);
+  }
+
+  // Subnet scan: for each of our IPs, try .1-.254 on port 9475
+  // Only scan if we have no candidates yet (avoid flooding the network)
+  if (candidates.size === 0) {
+    for (const myIP of myIPs) {
+      const parts = myIP.split('.');
+      if (parts.length === 4) {
+        const subnet = parts.slice(0, 3).join('.');
+        // Quick scan: just check a handful of common addresses
+        for (let i = 1; i <= 254; i++) {
+          const ip = `${subnet}.${i}`;
+          if (!myIPs.includes(ip)) candidates.add(ip);
+        }
+      }
+    }
+  }
+
+  if (candidates.size === 0) return cb(null);
+
+  // Probe in batches of 30 to avoid flooding the network
+  const ips = [...candidates];
+  let found = false;
+  let idx = 0;
+  const BATCH = 30;
+
+  function probeBatch() {
+    if (found || idx >= ips.length) {
+      if (!found) cb(null);
+      return;
+    }
+    const batch = ips.slice(idx, idx + BATCH);
+    idx += BATCH;
+    let pending = batch.length;
+    for (const ip of batch) {
+      probeHost(ip, LAN_PORT, (ok) => {
+        if (ok && !found) {
+          found = true;
+          cb(`${ip}:${LAN_PORT}`);
+        }
+        pending--;
+        if (pending === 0 && !found) probeBatch();
+      });
+    }
+  }
+  probeBatch();
+}
+
+function setConnectionMode(mode, peerAddr) {
+  const changed = mode !== connectionMode || peerAddr !== lanPeerAddress;
+  if (!changed) return;
+  const prev = connectionMode;
+  connectionMode = mode;
+  lanPeerAddress = mode === 'lan' ? peerAddr : null;
+  console.log(`[connection] ${prev} → ${mode}${peerAddr ? ` (peer: ${peerAddr})` : ''}`);
+  // Notify renderer
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('connection-mode', { mode, prev, peer: peerAddr });
+  }
+  // Restart push loop with appropriate interval
+  const remote = store.get('remote');
+  if (remote.clientEnabled && clientPushInterval) {
+    clearInterval(clientPushInterval);
+    const target = mode === 'lan' ? peerAddr : remote.serverAddress;
+    const interval = mode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+    pushSnapshotToServer(target);
+    clientPushInterval = setInterval(() => pushSnapshotToServer(target), interval);
+  }
+}
+
+function startLanProbing() {
+  if (lanProbeTimer) return;
+  // Probe immediately, then every 30s
+  const probe = () => {
+    // If we already have a known peer, just re-check it
+    if (lanPeerAddress) {
+      const [host, port] = lanPeerAddress.split(':');
+      probeHost(host, parseInt(port), (ok) => {
+        if (ok) {
+          setConnectionMode('lan', lanPeerAddress);
+        } else {
+          // Peer went away — fall back to cloud and rediscover
+          lanPeerAddress = null;
+          setConnectionMode('cloud', null);
+        }
+      });
+    } else {
+      // Full discovery
+      discoverLanPeers((peerAddr) => {
+        if (peerAddr) {
+          // Remember this peer for faster reconnect
+          const [peerIP] = peerAddr.split(':');
+          const known = store.get('knownPeerIPs') || [];
+          if (!known.includes(peerIP)) {
+            store.set('knownPeerIPs', [...known, peerIP]);
+          }
+          setConnectionMode('lan', peerAddr);
+        } else {
+          setConnectionMode('cloud', null);
+        }
+      });
+    }
+  };
+  probe();
+  lanProbeTimer = setInterval(probe, 30000);
+}
+
+function stopLanProbing() {
+  if (lanProbeTimer) { clearInterval(lanProbeTimer); lanProbeTimer = null; }
+}
 
 const store = new Store({
   defaults: {
@@ -1077,6 +1243,8 @@ function buildSnapshotPayload(sys, procs) {
     duplicates,
     events,
     uptime: sys.uptime,
+    lanIPs: getLocalIPs(),
+    lanPort: LAN_PORT,
   });
 }
 
@@ -1102,8 +1270,8 @@ let healerActions = [];        // log of actions taken
 const HEAL_CPU_WARN = 50;     // start watching
 const HEAL_CPU_ACT = 80;      // take action
 const HEAL_STREAK_THRESHOLD = 3; // consecutive readings before acting
-const ADAPTIVE_SLOW_INTERVAL = 30000; // slow polling under load
-const ADAPTIVE_FAST_INTERVAL = 15000; // normal polling
+const ADAPTIVE_SLOW_INTERVAL = 120000; // slow polling under load (2 min)
+const ADAPTIVE_FAST_INTERVAL = null;   // use mode-appropriate interval (see getActiveInterval())
 
 function autoHeal(sys, procs) {
   const cpu = sys.cpuPercent;
@@ -1117,8 +1285,10 @@ function autoHeal(sys, procs) {
       const remote = store.get('remote');
       if (remote.clientEnabled && remote.serverAddress) {
         clearInterval(clientPushInterval);
-        clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), ADAPTIVE_FAST_INTERVAL);
-        actions.push({ action: 'restore-polling', interval: ADAPTIVE_FAST_INTERVAL });
+        const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
+        const normalInterval = connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+        clientPushInterval = setInterval(() => pushSnapshotToServer(target), normalInterval);
+        actions.push({ action: 'restore-polling', interval: normalInterval });
       }
     }
     highCpuStreak = 0;
@@ -1130,7 +1300,8 @@ function autoHeal(sys, procs) {
     const remote = store.get('remote');
     if (remote.clientEnabled && remote.serverAddress) {
       clearInterval(clientPushInterval);
-      clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), ADAPTIVE_SLOW_INTERVAL);
+      const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
+      clientPushInterval = setInterval(() => pushSnapshotToServer(target), ADAPTIVE_SLOW_INTERVAL);
       actions.push({ action: 'slow-polling', interval: ADAPTIVE_SLOW_INTERVAL, reason: `CPU at ${cpu}% for 2 readings` });
     }
   }
@@ -1304,8 +1475,13 @@ function startClientPush() {
   if (!remote.clientEnabled || !remote.serverAddress) return;
   if (clientPushInterval) clearInterval(clientPushInterval);
 
-  pushSnapshotToServer(remote.serverAddress);
-  clientPushInterval = setInterval(() => pushSnapshotToServer(remote.serverAddress), 15000);
+  // Start LAN probing — will auto-switch between LAN and cloud
+  startLanProbing();
+
+  const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
+  const interval = connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+  pushSnapshotToServer(target);
+  clientPushInterval = setInterval(() => pushSnapshotToServer(target), interval);
 }
 
 function stopClientPush() {
@@ -1313,6 +1489,7 @@ function stopClientPush() {
     clearInterval(clientPushInterval);
     clientPushInterval = null;
   }
+  stopLanProbing();
 }
 
 // ─── IPC Handlers ───────────────────────────────────────────────────────────
@@ -1379,6 +1556,7 @@ ipcMain.handle('save-settings', (_, s) => {
   if (s.startMinimized !== undefined) store.set('startMinimized', s.startMinimized);
   return { status: 'ok' };
 });
+ipcMain.handle('get-connection-mode', () => ({ mode: connectionMode, peer: lanPeerAddress }));
 ipcMain.handle('get-remote-settings', () => store.get('remote'));
 ipcMain.handle('save-remote-settings', (_, settings) => {
   const prev = store.get('remote');
