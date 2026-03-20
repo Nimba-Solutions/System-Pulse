@@ -24,8 +24,8 @@ const LAN_PORT = 9475;
 
 // ─── Connection Mode ────────────────────────────────────────────────────────
 // Prefer LAN when available (free, fast), fall back to cloud (costs Redis ops).
-const CLOUD_INTERVAL = 60000;   // 60s when pushing to cloud (saves Redis quota)
-const LAN_INTERVAL = 15000;     // 15s over LAN (free, local traffic only)
+const CLOUD_INTERVAL = 300000;  // 5 min when pushing to cloud (saves Redis quota)
+const LAN_INTERVAL = 1000;      // 1s over LAN (free, local traffic only)
 let connectionMode = 'cloud';   // 'lan' | 'cloud' | 'offline'
 let lanPeerAddress = null;      // e.g. '192.168.1.172:9475' — dynamically discovered
 let lanProbeTimer = null;
