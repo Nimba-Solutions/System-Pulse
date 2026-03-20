@@ -958,6 +958,53 @@ function getLogSummary(filename) {
   };
 }
 
+// ─── Peer Logging (LAN snapshots) ───────────────────────────────────────────
+// Logs every snapshot received from LAN peers to local disk for diagnostics.
+// Files: peer-{hostname}-{YYYY-MM-DD}.jsonl in the same log directory.
+
+function logPeerSnapshot(hostname, data) {
+  try {
+    ensureLogDir();
+    const safe = hostname.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const date = new Date().toISOString().split('T')[0];
+    const filePath = path.join(logDir, `peer-${safe}-${date}.jsonl`);
+    const entry = {
+      ts: data.ts || new Date().toISOString(),
+      cpu: data.cpu,
+      memUsedMb: data.memUsedMb,
+      memTotalMb: data.memTotalMb,
+      memPct: data.memPct,
+      topCpu: (data.topCpu || []).slice(0, 5),
+      topMem: (data.topMem || []).slice(0, 5),
+      duplicates: data.duplicates || [],
+      events: data.events || [],
+      uptime: data.uptime,
+    };
+    fs.appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf8');
+  } catch (_) { /* don't crash on log failure */ }
+}
+
+function getPeerLogFiles(hostname) {
+  ensureLogDir();
+  try {
+    const safe = hostname ? hostname.replace(/[^a-zA-Z0-9_-]/g, '_') : '';
+    return fs.readdirSync(logDir)
+      .filter(f => f.startsWith('peer-') && f.endsWith('.jsonl') && (!hostname || f.includes(safe)))
+      .sort()
+      .reverse();
+  } catch (_) { return []; }
+}
+
+function readPeerLog(filename, tail) {
+  const filePath = path.join(logDir, filename);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
+    const entries = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    return tail ? entries.slice(-tail) : entries;
+  } catch (_) { return []; }
+}
+
 // ─── Remote Monitoring ─────────────────────────────────────────────────────
 
 let remoteServer = null;
@@ -984,6 +1031,8 @@ function startRemoteServer(port) {
             lastSnapshot: data,
             lastSeen: Date.now(),
           });
+          // Log peer snapshot to disk
+          logPeerSnapshot(hostname, data);
           // Forward to renderer
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('remote-snapshot', { hostname, data });
@@ -1116,6 +1165,62 @@ function startRemoteServer(port) {
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(found || { pending: true }));
+    } else if (req.method === 'GET' && req.url === '/logs') {
+      // List all local log files (own + peer)
+      ensureLogDir();
+      try {
+        const files = fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort().reverse();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(files));
+      } catch (_) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('[]');
+      }
+    } else if (req.method === 'GET' && req.url.startsWith('/logs/')) {
+      // Read a specific log file, optional ?tail=N
+      const filename = decodeURIComponent(req.url.split('/logs/')[1].split('?')[0]);
+      const urlParams = new URL(req.url, 'http://localhost').searchParams;
+      const tail = parseInt(urlParams.get('tail')) || 0;
+      if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+        res.writeHead(400); res.end('bad filename'); return;
+      }
+      const filePath = path.join(logDir, filename);
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('[]');
+        return;
+      }
+      try {
+        const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').filter(Boolean);
+        const entries = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(tail ? entries.slice(-tail) : entries));
+      } catch (_) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('[]');
+      }
+    } else if (req.method === 'POST' && req.url === '/exec') {
+      // Direct LAN command execution — run a command on THIS machine
+      let body = '';
+      req.on('data', chunk => { body += chunk; if (body.length > 65536) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { command, timeout: cmdTimeout } = JSON.parse(body);
+          if (!command) { res.writeHead(400); res.end(JSON.stringify({ error: 'command required' })); return; }
+          const maxTimeout = command.match(/winget|install|msiexec|choco|setup|brew/i) ? 300000 : (cmdTimeout || 30000);
+          guard.exec(command, { timeout: maxTimeout, windowsHide: true, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              stdout: (stdout || '').slice(0, 500000),
+              stderr: (stderr || '').slice(0, 100000),
+              exitCode: err ? err.code || 1 : 0,
+            }));
+          });
+        } catch (e) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'bad request' }));
+        }
+      });
     } else {
       res.writeHead(404);
       res.end('not found');
@@ -1607,6 +1712,10 @@ ipcMain.handle('get-log-files', () => getLogFiles());
 ipcMain.handle('get-log-entries', (_, filename) => readLogFile(filename));
 ipcMain.handle('get-log-summary', (_, filename) => getLogSummary(filename));
 ipcMain.handle('get-log-dir', () => logDir);
+
+// Peer log queries
+ipcMain.handle('get-peer-log-files', (_, hostname) => getPeerLogFiles(hostname));
+ipcMain.handle('get-peer-log', (_, { filename, tail }) => readPeerLog(filename, tail));
 
 // ─── Single instance lock ───────────────────────────────────────────────────
 

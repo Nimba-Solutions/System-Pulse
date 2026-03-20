@@ -47,6 +47,10 @@ contextBridge.exposeInMainWorld('api', {
   onRemoteSnapshot: (cb) => ipcRenderer.on('remote-snapshot', (_, data) => cb(data)),
   onRemoteAlert: (cb) => ipcRenderer.on('remote-alert', (_, data) => cb(data)),
 
+  // Peer logs (LAN diagnostics)
+  getPeerLogFiles: (hostname) => ipcRenderer.invoke('get-peer-log-files', hostname),
+  getPeerLog: (filename, tail) => ipcRenderer.invoke('get-peer-log', { filename, tail }),
+
   // Events from main
   onTrayHealthUpdate: (cb) => ipcRenderer.on('health-update', (_, data) => cb(data)),
 });
