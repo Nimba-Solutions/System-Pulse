@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Connection mode
   getConnectionMode: () => ipcRenderer.invoke('get-connection-mode'),
+  setInterval: (ms) => ipcRenderer.invoke('set-push-interval', ms),
   onConnectionMode: (cb) => ipcRenderer.on('connection-mode', (_, data) => cb(data)),
 
   // Remote monitoring

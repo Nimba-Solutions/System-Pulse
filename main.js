@@ -29,6 +29,7 @@ const LAN_INTERVAL = 1000;      // 1s over LAN (free, local traffic only)
 let connectionMode = 'cloud';   // 'lan' | 'cloud' | 'offline'
 let lanPeerAddress = null;      // e.g. '192.168.1.172:9475' — dynamically discovered
 let lanProbeTimer = null;
+let userInterval = null;        // user override — if set, takes priority over mode defaults
 
 // Get all local IPv4 addresses for this machine
 function getLocalIPs() {
@@ -134,14 +135,14 @@ function setConnectionMode(mode, peerAddr) {
   console.log(`[connection] ${prev} → ${mode}${peerAddr ? ` (peer: ${peerAddr})` : ''}`);
   // Notify renderer
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('connection-mode', { mode, prev, peer: peerAddr });
+    mainWindow.webContents.send('connection-mode', { mode, prev, peer: peerAddr, interval: mode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL });
   }
   // Restart push loop with appropriate interval
   const remote = store.get('remote');
   if (remote.clientEnabled && clientPushInterval) {
     clearInterval(clientPushInterval);
     const target = mode === 'lan' ? peerAddr : remote.serverAddress;
-    const interval = mode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+    const interval = userInterval || (mode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL);
     pushSnapshotToServer(target);
     clientPushInterval = setInterval(() => pushSnapshotToServer(target), interval);
   }
@@ -212,6 +213,9 @@ if (!currentAddr || currentAddr === '192.168.1.172:9475') {
   store.set('remote.clientEnabled', true);
   store.set('remote.serverAddress', DEFAULT_SERVER);
 }
+// Load user's custom interval if set
+userInterval = store.get('pushInterval') || null;
+
 if (store.get('autoStart') === false && store.get('firstRun') === undefined) {
   store.set('autoStart', true);
   store.set('startMinimized', true);
@@ -1391,7 +1395,7 @@ function autoHeal(sys, procs) {
       if (remote.clientEnabled && remote.serverAddress) {
         clearInterval(clientPushInterval);
         const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
-        const normalInterval = connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+        const normalInterval = userInterval || (connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL);
         clientPushInterval = setInterval(() => pushSnapshotToServer(target), normalInterval);
         actions.push({ action: 'restore-polling', interval: normalInterval });
       }
@@ -1584,7 +1588,7 @@ function startClientPush() {
   startLanProbing();
 
   const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
-  const interval = connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL;
+  const interval = userInterval || (connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL);
   pushSnapshotToServer(target);
   clientPushInterval = setInterval(() => pushSnapshotToServer(target), interval);
 }
@@ -1661,7 +1665,30 @@ ipcMain.handle('save-settings', (_, s) => {
   if (s.startMinimized !== undefined) store.set('startMinimized', s.startMinimized);
   return { status: 'ok' };
 });
-ipcMain.handle('get-connection-mode', () => ({ mode: connectionMode, peer: lanPeerAddress }));
+ipcMain.handle('get-connection-mode', () => ({
+  mode: connectionMode,
+  peer: lanPeerAddress,
+  interval: userInterval || (connectionMode === 'lan' ? LAN_INTERVAL : CLOUD_INTERVAL),
+}));
+
+ipcMain.handle('set-push-interval', (_, ms) => {
+  if (ms < 500 || ms > 3600000) return { status: 'error', message: 'interval out of range' };
+  userInterval = ms;
+  store.set('pushInterval', ms);
+  // Restart push loop with new interval
+  const remote = store.get('remote');
+  if (remote.clientEnabled && clientPushInterval) {
+    clearInterval(clientPushInterval);
+    const target = connectionMode === 'lan' && lanPeerAddress ? lanPeerAddress : remote.serverAddress;
+    pushSnapshotToServer(target);
+    clientPushInterval = setInterval(() => pushSnapshotToServer(target), ms);
+  }
+  console.log(`[interval] User set push interval to ${ms}ms`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('connection-mode', { mode: connectionMode, peer: lanPeerAddress, interval: ms });
+  }
+  return { status: 'ok' };
+});
 ipcMain.handle('get-remote-settings', () => store.get('remote'));
 ipcMain.handle('save-remote-settings', (_, settings) => {
   const prev = store.get('remote');

@@ -76,6 +76,44 @@
     .mode-badge.cloud .mode-dot { background: #aa88ff; }
     .mode-badge.offline { background: #3a1c1c; color: #ff5555; border: 1px solid #6a2a2a; }
     .mode-badge.offline .mode-dot { background: #ff5555; }
+    .interval-badge {
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+      background: #1a1730;
+      color: #888;
+      border: 1px solid #333;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .interval-badge:hover { border-color: #f59e0b; color: #f59e0b; }
+    .interval-picker {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 4px;
+      background: #1a1730;
+      border: 1px solid #444;
+      border-radius: 8px;
+      padding: 6px 0;
+      z-index: 100;
+      min-width: 140px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    .interval-picker.open { display: block; }
+    .interval-option {
+      padding: 6px 14px;
+      font-size: 12px;
+      color: #ccc;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .interval-option:hover { background: #2a2545; color: #fff; }
+    .interval-option.active { color: #f59e0b; }
+    .interval-wrap { position: relative; display: inline-block; }
     .health-badge.warning { background: #3a2a0a; color: #f59e0b; border: 1px solid #5a4a1a; }
     .health-badge.critical { background: #4a1c1c; color: #ef4444; border: 1px solid #6a2a2a; }
 
@@ -518,6 +556,18 @@
     <h1><span>System</span> Pulse</h1>
     <span class="health-badge ok" id="healthBadge">HEALTHY</span>
     <span class="mode-badge cloud" id="modeBadge"><span class="mode-dot"></span>CLOUD</span>
+    <span class="interval-wrap">
+      <span class="interval-badge" id="intervalBadge" onclick="toggleIntervalPicker()">--</span>
+      <div class="interval-picker" id="intervalPicker">
+        <div class="interval-option" data-ms="1000">1s</div>
+        <div class="interval-option" data-ms="5000">5s</div>
+        <div class="interval-option" data-ms="15000">15s</div>
+        <div class="interval-option" data-ms="30000">30s</div>
+        <div class="interval-option" data-ms="60000">1 min</div>
+        <div class="interval-option" data-ms="300000">5 min</div>
+        <div class="interval-option" data-ms="600000">10 min</div>
+      </div>
+    </span>
   </div>
   <div class="branding">
     Powered by <a href="https://cloudnimbus.dev" target="_blank">Cloud Nimbus LLC</a>
@@ -1502,24 +1552,62 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // ─── Connection Mode Badge ──────────────────────────────────────────────────
-function updateModeBadge(mode, peer) {
+let currentInterval = 0;
+
+function formatInterval(ms) {
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000) + 's';
+  return (ms / 60000) + ' min';
+}
+
+function updateModeBadge(mode, peer, interval) {
   const badge = document.getElementById('modeBadge');
   badge.className = 'mode-badge ' + mode;
   const labels = { lan: 'LAN', cloud: 'CLOUD', offline: 'OFFLINE' };
   const label = labels[mode] || mode.toUpperCase();
-  const peerTip = peer ? ` — ${peer}` : '';
-  badge.title = mode === 'lan' ? `Direct LAN connection to ${peer || 'peer'}` : mode === 'cloud' ? 'Routing through cloudnimbusllc.com (60s interval)' : 'No connection';
+  badge.title = mode === 'lan' ? `Direct LAN connection to ${peer || 'peer'}` : mode === 'cloud' ? 'Routing through cloudnimbusllc.com' : 'No connection';
   badge.innerHTML = `<span class="mode-dot"></span>${label}${mode === 'lan' && peer ? ' <span style="opacity:0.6;font-size:10px;font-weight:400">' + peer.split(':')[0] + '</span>' : ''}`;
+  if (interval) {
+    currentInterval = interval;
+    document.getElementById('intervalBadge').textContent = formatInterval(interval);
+    // Highlight active option
+    document.querySelectorAll('.interval-option').forEach(opt => {
+      opt.classList.toggle('active', parseInt(opt.dataset.ms) === interval);
+    });
+  }
 }
+
+function toggleIntervalPicker() {
+  document.getElementById('intervalPicker').classList.toggle('open');
+}
+
+// Close picker on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.interval-wrap')) {
+    document.getElementById('intervalPicker').classList.remove('open');
+  }
+});
+
+// Handle interval selection
+document.querySelectorAll('.interval-option').forEach(opt => {
+  opt.addEventListener('click', async () => {
+    const ms = parseInt(opt.dataset.ms);
+    await window.api.setInterval(ms);
+    currentInterval = ms;
+    document.getElementById('intervalBadge').textContent = formatInterval(ms);
+    document.querySelectorAll('.interval-option').forEach(o => o.classList.toggle('active', parseInt(o.dataset.ms) === ms));
+    document.getElementById('intervalPicker').classList.remove('open');
+  });
+});
 
 (async () => {
   try {
-    const { mode, peer } = await window.api.getConnectionMode();
-    updateModeBadge(mode, peer);
+    const { mode, peer, interval } = await window.api.getConnectionMode();
+    updateModeBadge(mode, peer, interval);
   } catch (_) {}
 })();
 
-window.api.onConnectionMode(({ mode, peer }) => updateModeBadge(mode, peer));
+window.api.onConnectionMode(({ mode, peer, interval }) => updateModeBadge(mode, peer, interval));
 
 // ─── Start Polling ──────────────────────────────────────────────────────────
 pollSystemInfo();
