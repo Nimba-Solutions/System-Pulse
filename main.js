@@ -1372,7 +1372,8 @@ const KNOWN_BLOATWARE = [
 ];
 const NEVER_KILL = ['node.exe', 'explorer.exe', 'csrss.exe', 'winlogon.exe',
   'services.exe', 'lsass.exe', 'smss.exe', 'wininit.exe', 'System',
-  'svchost.exe', 'dwm.exe', 'electron.exe'];
+  'svchost.exe', 'dwm.exe', 'electron.exe', 'conhost.exe', 'cmd.exe',
+  'claude.exe', 'claude-cli.exe'];
 
 let highCpuStreak = 0;        // consecutive high-CPU readings
 let healerActions = [];        // log of actions taken
@@ -1447,7 +1448,7 @@ function autoHeal(sys, procs) {
       // When CPU is so high tasklist returns nothing, we can't see what's eating CPU.
       // Blind-kill the usual suspects — they all respawn cleanly.
       const blindTargets = cpu >= 90
-        ? ['WmiPrvSE.exe', 'powershell.exe', 'CompatTelRunner.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe', 'SearchProtocolHost.exe', 'wmic.exe', 'conhost.exe']
+        ? ['WmiPrvSE.exe', 'powershell.exe', 'CompatTelRunner.exe', 'MoUsoCoreWorker.exe', 'TiWorker.exe', 'SearchProtocolHost.exe', 'wmic.exe']
         : KNOWN_BLOATWARE;
       for (const name of blindTargets) {
         guard.exec(`taskkill /f /im "${name}" 2>NUL`, { windowsHide: true, timeout: 5000 });
